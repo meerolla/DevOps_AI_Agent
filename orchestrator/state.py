@@ -18,6 +18,7 @@ StepName = Literal[
     "healthcheck",
 ]
 StepOutcome = Literal["pending", "ok", "failed", "escalated"]
+PauseReason = Literal["approve_infra", "approve_deploy"]
 
 
 class BuildPlan(BaseModel):
@@ -64,6 +65,12 @@ class PipelineApprovals(BaseModel):
 class PipelineState(BaseModel):
     goal: str
     repo_ref: str
+    cluster: str = "default"
+    registry: str = "ghcr.io/demo/sample"
+    namespace: str = "demo"
+    app_name: str = "app"
+    pull_secret_name: str = "ghcr-pull-secret"
+    auto_commit: bool = True
     build_plan: Optional[BuildPlan] = None
     dockerfile_ref: Optional[str] = None
     image_ref: Optional[str] = None
@@ -92,6 +99,10 @@ class PipelineState(BaseModel):
     retry_limit: int = 2
     last_failed_step: Optional[StepName] = None
     escalate_reason: Optional[str] = None
+    paused_for: Optional[PauseReason] = None
+    pending_approval_summary: Optional[str] = None
+    state_file_ref: Optional[str] = None
+    commit_sha: Optional[str] = None
 
     def mark_step(self, step: StepName, outcome: StepOutcome) -> None:
         self.step_status[step] = outcome
@@ -102,3 +113,14 @@ class PipelineState(BaseModel):
         current = self.retries.get(step, 0) + 1
         self.retries[step] = current
         return current
+
+    def image_ref_for_registry(self) -> str:
+        return f"{self.registry}:latest"
+
+    def pause(self, reason: PauseReason, summary: str) -> None:
+        self.paused_for = reason
+        self.pending_approval_summary = summary
+
+    def clear_pause(self) -> None:
+        self.paused_for = None
+        self.pending_approval_summary = None

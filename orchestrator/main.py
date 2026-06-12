@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -9,16 +10,73 @@ from orchestrator.graph import run_pipeline
 from orchestrator.state import PipelineState
 
 
-def run_command(repo: str, goal: str, auto_approve: bool) -> int:
-    state = PipelineState(goal=goal, repo_ref=repo)
+def _state_file(repo: str) -> Path:
+    return Path(repo) / ".orchestrator_state.json"
+
+
+def _load_state(repo: str) -> PipelineState:
+    state_file = _state_file(repo)
+    return PipelineState.model_validate_json(state_file.read_text(encoding="utf-8"))
+
+
+def _save_state(state: PipelineState) -> Path:
+    state_file = _state_file(state.repo_ref)
+    state.state_file_ref = str(state_file)
+    state_file.write_text(json.dumps(state.model_dump(), indent=2), encoding="utf-8")
+    return state_file
+
+
+def _render_pause_instruction(state: PipelineState) -> str:
+    if state.paused_for == "approve_infra":
+        return (
+            "Pipeline paused for infrastructure approval.\n"
+            f"Plan:\n{state.pending_approval_summary or ''}\n"
+            f"Run: python -m orchestrator.main approve --repo {state.repo_ref} --step infra\n"
+            f"Then: python -m orchestrator.main resume --repo {state.repo_ref}"
+        )
+    return (
+        "Pipeline paused for deploy approval.\n"
+        f"Image:\n{state.pending_approval_summary or ''}\n"
+        f"Run: python -m orchestrator.main approve --repo {state.repo_ref} --step deploy\n"
+        f"Then: python -m orchestrator.main resume --repo {state.repo_ref}"
+    )
+
+
+def run_command(
+    repo: str,
+    goal: str,
+    cluster: str,
+    registry: str,
+    namespace: str,
+    auto_approve: bool,
+    auto_commit: bool,
+) -> int:
+    state = PipelineState(
+        goal=goal,
+        repo_ref=repo,
+        cluster=cluster,
+        registry=registry,
+        namespace=namespace,
+        app_name=Path(registry.split(":")[0]).name,
+        auto_commit=auto_commit,
+    )
     final_state = run_pipeline(state, auto_approve=auto_approve)
 
     audit_path = Path(repo) / ".orchestrator_audit.log"
     write_audit_log(final_state, audit_path)
+    state_path = _save_state(final_state)
+
+    if final_state.paused_for:
+        print(_render_pause_instruction(final_state))
+        print(f"State file: {state_path}")
+        print(f"Audit log: {audit_path}")
+        return 2
 
     all_ok = all(status == "ok" for status in final_state.step_status.values())
     if all_ok:
         print("Pipeline completed successfully.")
+        if final_state.commit_sha:
+            print(f"Auto-commit result: {final_state.commit_sha}")
         print(f"Audit log: {audit_path}")
         return 0
 
@@ -34,8 +92,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = sub.add_parser("run", help="Run the orchestration pipeline")
     run_parser.add_argument("--repo", required=True, help="Repository path")
-    run_parser.add_argument("--goal", required=True, help="Goal description")
+    run_parser.add_argument("--cluster", required=True, help="Kubernetes context name")
+    run_parser.add_argument("--registry", required=True, help="Container registry reference, e.g. ghcr.io/org/app")
+    run_parser.add_argument("--namespace", required=True, help="Target Kubernetes namespace")
+    run_parser.add_argument("--goal", default="given an app repo, set up CI/CD and deploy it", help="Goal description")
     run_parser.add_argument("--auto-approve", action="store_true", help="Auto approve both gates")
+    run_parser.add_argument("--no-auto-commit", action="store_true", help="Disable auto-commit of generated artifacts")
+
+    approve_parser = sub.add_parser("approve", help="Approve a paused gate")
+    approve_parser.add_argument("--repo", required=True, help="Repository path")
+    approve_parser.add_argument("--step", choices=["infra", "deploy"], required=True, help="Gate to approve")
+
+    resume_parser = sub.add_parser("resume", help="Resume from a paused run")
+    resume_parser.add_argument("--repo", required=True, help="Repository path")
+    resume_parser.add_argument("--auto-approve", action="store_true", help="Auto approve remaining gates")
 
     return parser
 
@@ -45,7 +115,46 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "run":
-        return run_command(args.repo, args.goal, args.auto_approve)
+        return run_command(
+            repo=args.repo,
+            goal=args.goal,
+            cluster=args.cluster,
+            registry=args.registry,
+            namespace=args.namespace,
+            auto_approve=args.auto_approve,
+            auto_commit=not args.no_auto_commit,
+        )
+
+    if args.command == "approve":
+        state = _load_state(args.repo)
+        if args.step == "infra":
+            state.approvals.infra = True
+        if args.step == "deploy":
+            state.approvals.deploy = True
+        _save_state(state)
+        print(f"Approved: {args.step}")
+        return 0
+
+    if args.command == "resume":
+        state = _load_state(args.repo)
+        final_state = run_pipeline(state, auto_approve=args.auto_approve)
+
+        audit_path = Path(args.repo) / ".orchestrator_audit.log"
+        write_audit_log(final_state, audit_path)
+        _save_state(final_state)
+
+        if final_state.paused_for:
+            print(_render_pause_instruction(final_state))
+            return 2
+
+        all_ok = all(status == "ok" for status in final_state.step_status.values())
+        if all_ok:
+            print("Pipeline completed successfully.")
+            return 0
+
+        print("Pipeline did not fully complete.")
+        print(f"Escalation: {final_state.escalate_reason or 'approval not granted or step failure'}")
+        return 1
 
     parser.print_help()
     return 1

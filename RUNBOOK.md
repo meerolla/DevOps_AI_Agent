@@ -38,6 +38,12 @@ On-prem, on your single Ubuntu machine:
 - [ ] Run it (note: GHCR registry, k3d kube-context):
       `pipeline-setup run --repo ./my-app --cluster k3d-mycluster --registry ghcr.io/<org>/my-app --namespace my-app`
 
+When the run pauses at a gate, approve and resume:
+- `pipeline-setup approve --repo ./my-app --step infra`
+- `pipeline-setup resume --repo ./my-app`
+- `pipeline-setup approve --repo ./my-app --step deploy`
+- `pipeline-setup resume --repo ./my-app`
+
 The orchestrator then:
 1. **Plan** (agent) → BuildPlan.
 2. **Dockerize** (agent) → Dockerfile; **Build** (tool) → image pushed to **GHCR**.
