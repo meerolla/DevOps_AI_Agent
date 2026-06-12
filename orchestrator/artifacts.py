@@ -125,6 +125,26 @@ spec:
 """
 
 
+def regenerate_helm_config(state: PipelineState) -> list[Path]:
+    """Re-render helm/values.yaml and helm/templates/deployment.yaml from current state."""
+    repo = Path(state.repo_ref)
+    (repo / "helm" / "templates").mkdir(parents=True, exist_ok=True)
+    values_path = repo / "helm" / "values.yaml"
+    values_path.write_text(_helm_values(state.image_ref_for_registry(), state.namespace), encoding="utf-8")
+    deployment_path = repo / "helm" / "templates" / "deployment.yaml"
+    deployment_path.write_text(_helm_deployment(state.app_name, state.pull_secret_name), encoding="utf-8")
+    return [values_path, deployment_path]
+
+
+def regenerate_argocd_application(state: PipelineState) -> Path:
+    """Re-render argocd/application.yaml from current state."""
+    repo = Path(state.repo_ref)
+    (repo / "argocd").mkdir(parents=True, exist_ok=True)
+    argocd_path = repo / "argocd" / "application.yaml"
+    argocd_path.write_text(_argocd_application(state.app_name, state.namespace), encoding="utf-8")
+    return argocd_path
+
+
 def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[Path]:
     repo = Path(state.repo_ref)
     app_name = state.app_name

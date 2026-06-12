@@ -2,17 +2,172 @@ import os
 import shutil
 from pathlib import Path
 
+from orchestrator.agents.diagnose_fix import apply_fix_for_failure
 from orchestrator.graph import run_pipeline
-from orchestrator.state import PipelineState
+from orchestrator.state import BuildPlan, PipelineState
 
 
-def test_full_run_mock_sandbox_recovers_seeded_failure(tmp_path: Path) -> None:
+def _make_state(tmp_path: Path, **kwargs) -> PipelineState:
+    return PipelineState(
+        goal="test",
+        repo_ref=str(tmp_path),
+        cluster="default",
+        registry="ghcr.io/demo/sample",
+        namespace="my-app",
+        app_name="sample",
+        pull_secret_name="ghcr-pull-secret",
+        **kwargs,
+    )
+
+
+# ── Boundary invariant: Diagnose-Fix never writes app source code ─────────────
+
+def test_diagnose_fix_test_failure_escalates_never_writes_files(tmp_path: Path) -> None:
+    """test failures always escalate; no file in the repo is touched."""
+    os.environ["LLM_MODE"] = "mock"
+    app_file = tmp_path / "app.py"
+    app_file.write_text("def add(a, b): return a - b\n", encoding="utf-8")
+    mtime_before = app_file.stat().st_mtime
+
+    state = _make_state(tmp_path)
+    state.build_plan = BuildPlan(language="python", test_command="pytest -q")
+
+    proposal = apply_fix_for_failure(tmp_path, "test", "FAILED assert add(2,3)==5", state)
+
+    assert proposal.escalated is True
+    assert proposal.fix_type == "escalate"
+    assert app_file.stat().st_mtime == mtime_before, "app.py must not be modified"
+
+
+def test_diagnose_fix_does_not_write_outside_owned_artifacts(tmp_path: Path) -> None:
+    """_assert_owned_artifact raises ValueError for any non-artifact path."""
+    from orchestrator.agents.diagnose_fix import _assert_owned_artifact
+    import pytest
+
+    # allowed paths
+    _assert_owned_artifact(tmp_path / "Dockerfile", tmp_path)
+    _assert_owned_artifact(tmp_path / "helm" / "values.yaml", tmp_path)
+    _assert_owned_artifact(tmp_path / ".github" / "workflows" / "ci.yml", tmp_path)
+    _assert_owned_artifact(tmp_path / "argocd" / "application.yaml", tmp_path)
+
+    # disallowed paths
+    with pytest.raises(ValueError):
+        _assert_owned_artifact(tmp_path / "app.py", tmp_path)
+    with pytest.raises(ValueError):
+        _assert_owned_artifact(tmp_path / "src" / "main.py", tmp_path)
+    with pytest.raises(ValueError):
+        _assert_owned_artifact(tmp_path / "requirements.txt", tmp_path)
+
+
+# ── Per-handler tests ─────────────────────────────────────────────────────────
+
+def test_diagnose_fix_build_failure_regenerates_dockerfile(tmp_path: Path) -> None:
+    os.environ["LLM_MODE"] = "mock"
+    state = _make_state(tmp_path)
+    state.build_plan = BuildPlan(language="python", entrypoint="app.py", test_command="pytest -q")
+
+    proposal = apply_fix_for_failure(tmp_path, "build", "error: RUN pip failed line 3", state)
+
+    assert proposal.escalated is False
+    assert proposal.fix_type == "tool_retry"
+    assert (tmp_path / "Dockerfile").exists(), "Dockerfile should be regenerated"
+    assert not (tmp_path / "app.py").exists(), "app.py must not be created"
+
+
+def test_diagnose_fix_build_infra_error_escalates(tmp_path: Path) -> None:
+    os.environ["LLM_MODE"] = "mock"
+    state = _make_state(tmp_path)
+    state.build_plan = BuildPlan(language="python")
+
+    proposal = apply_fix_for_failure(
+        tmp_path, "build",
+        "permission denied while trying to connect to the Docker daemon socket", state
+    )
+
+    assert proposal.escalated is True
+    assert proposal.fix_type == "infra_hint"
+    assert not (tmp_path / "Dockerfile").exists(), "Dockerfile must not be written for infra errors"
+
+
+def test_diagnose_fix_healthcheck_infra_error_escalates(tmp_path: Path) -> None:
+    os.environ["LLM_MODE"] = "mock"
+    state = _make_state(tmp_path)
+
+    proposal = apply_fix_for_failure(
+        tmp_path, "healthcheck",
+        "Pod status: ImagePullBackOff\nBack-off pulling image ghcr.io/demo/sample:latest", state
+    )
+
+    assert proposal.escalated is True
+    assert proposal.fix_type == "infra_hint"
+    assert "ImagePullBackOff" in proposal.root_cause
+
+
+def test_diagnose_fix_healthcheck_config_error_regenerates_helm(tmp_path: Path) -> None:
+    os.environ["LLM_MODE"] = "mock"
+    state = _make_state(tmp_path)
+    (tmp_path / "helm" / "templates").mkdir(parents=True)
+
+    proposal = apply_fix_for_failure(
+        tmp_path, "healthcheck",
+        "Deployment resume-scorer not ready after rollout timeout", state
+    )
+
+    assert proposal.escalated is False
+    assert proposal.fix_type == "config_hint"
+    assert (tmp_path / "helm" / "values.yaml").exists()
+    assert (tmp_path / "helm" / "templates" / "deployment.yaml").exists()
+    assert not (tmp_path / "app.py").exists()
+
+
+def test_diagnose_fix_deploy_config_error_regenerates_argocd(tmp_path: Path) -> None:
+    os.environ["LLM_MODE"] = "mock"
+    state = _make_state(tmp_path)
+
+    proposal = apply_fix_for_failure(
+        tmp_path, "deploy",
+        "Error: chart path ./helm not found\nnamespace my-app not found", state
+    )
+
+    assert proposal.escalated is False
+    assert proposal.fix_type == "config_hint"
+    assert (tmp_path / "argocd" / "application.yaml").exists()
+    assert not (tmp_path / "app.py").exists()
+
+
+def test_diagnose_fix_provision_always_escalates(tmp_path: Path) -> None:
+    os.environ["LLM_MODE"] = "mock"
+    state = _make_state(tmp_path)
+
+    proposal = apply_fix_for_failure(tmp_path, "provision", "namespace my-app not found", state)
+
+    assert proposal.escalated is True
+    assert proposal.fix_type == "infra_hint"
+    assert state.namespace in proposal.hint
+
+
+def test_diagnose_fix_scan_vulnerability_escalates(tmp_path: Path) -> None:
+    os.environ["LLM_MODE"] = "mock"
+    state = _make_state(tmp_path)
+
+    proposal = apply_fix_for_failure(tmp_path, "scan", "CRITICAL CVE-2024-1234 in libssl", state)
+
+    assert proposal.escalated is True
+    assert proposal.fix_type == "escalate"
+
+
+# ── Full pipeline run: app-code bug escalates correctly ───────────────────────
+
+def test_full_run_mock_sandbox_app_bug_escalates(tmp_path: Path) -> None:
+    """Seeded app bug causes test step to escalate. No app code is patched."""
     os.environ["SANDBOX"] = "1"
     os.environ["LLM_MODE"] = "mock"
 
     fixture_repo = Path("tests/fixtures/sample-repo")
     repo_copy = tmp_path / "sample-repo"
     shutil.copytree(fixture_repo, repo_copy)
+
+    original_app = (repo_copy / "app.py").read_text(encoding="utf-8")
 
     state = PipelineState(
         goal="set up CI/CD and deploy",
@@ -21,24 +176,24 @@ def test_full_run_mock_sandbox_recovers_seeded_failure(tmp_path: Path) -> None:
         registry="ghcr.io/demo/sample",
         namespace="my-app",
         app_name="sample",
-        auto_commit=True,
+        auto_commit=False,
     )
     final_state = run_pipeline(state, auto_approve=True)
 
-    assert final_state.step_status["test"] == "ok"
-    assert final_state.step_status["deploy"] == "ok"
-    assert final_state.step_status["healthcheck"] == "ok"
-    assert final_state.approvals.infra is True
-    assert final_state.approvals.deploy is True
-    assert final_state.retries.get("test", 0) >= 1
+    # test step escalates — app code bugs are the developer's job
+    assert final_state.step_status["test"] == "escalated"
+    assert final_state.last_fix_proposal is not None
+    assert final_state.last_fix_proposal.fix_type == "escalate"
 
-    app_text = (repo_copy / "app.py").read_text(encoding="utf-8")
-    assert "return a + b" in app_text
+    # app.py is untouched — the boundary is enforced
+    assert (repo_copy / "app.py").read_text(encoding="utf-8") == original_app
 
+    # pipeline artifacts were still generated before test ran
     assert (repo_copy / ".github" / "workflows" / "ci.yml").exists()
     assert (repo_copy / ".github" / "workflows" / "ci-self-heal.yml").exists()
     assert (repo_copy / "helm" / "Chart.yaml").exists()
     assert (repo_copy / "argocd" / "application.yaml").exists()
 
+    # audit log contains no secrets
     for entry in final_state.audit:
         assert "ghp_" not in entry.details

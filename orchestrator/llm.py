@@ -50,19 +50,14 @@ class MockLLM:
         )
 
     def diagnose(self, failed_step: str, failure_output: str) -> FixProposal:
-        if failed_step == "test" and "Expected 5" in failure_output:
-            return FixProposal(
-                root_cause="Bug in add implementation in app.py",
-                confidence=0.95,
-                change_summary="Replace subtraction with addition in app.py",
-                retry_step="test",
-            )
         return FixProposal(
-            root_cause="Unknown deterministic failure",
+            root_cause="Unknown failure — escalating to human",
             confidence=0.2,
             change_summary="Escalate to human",
-            retry_step="test",
+            retry_step=failed_step,  # type: ignore[arg-type]
             escalated=True,
+            fix_type="escalate",
+            hint="Review the audit log for details and address the root cause manually.",
         )
 
 
@@ -142,19 +137,24 @@ class ProviderLLM(MockLLM):
 
     def diagnose(self, failed_step: str, failure_output: str) -> FixProposal:
         prompt = (
-            "Diagnose a pipeline failure and propose a safe fix for only the failing step. "
-            "Never weaken tests or scans.\n"
+            "Diagnose a pipeline failure in a CI/CD orchestrator. "
+            "Never weaken tests or scans. Do not propose changes to application source code.\n"
             f"Failed step: {failed_step}\n"
             f"Failure output:\n{failure_output[:6000]}"
         )
         payload = self._chat_json(
             system_prompt=(
-                "Return strict JSON with keys: root_cause, confidence, change_summary, retry_step, escalated."
+                "Return strict JSON with keys: root_cause, confidence, change_summary, "
+                "retry_step, escalated, fix_type, hint. "
+                "fix_type must be one of: infra_hint, config_hint, tool_retry, escalate. "
+                "hint must be a short actionable string for the operator."
             ),
             user_prompt=prompt,
         )
         try:
             payload.setdefault("retry_step", failed_step)
+            payload.setdefault("fix_type", "escalate")
+            payload.setdefault("hint", "")
             return FixProposal.model_validate(payload)
         except Exception:
             return super().diagnose(failed_step, failure_output)
