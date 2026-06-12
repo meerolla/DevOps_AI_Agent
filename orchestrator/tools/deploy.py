@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from orchestrator.state import ToolResult
@@ -62,10 +63,22 @@ def deploy(
             artifact_ref=None,
         )
 
-    sync_ok, sync_output = run_command(
-        f"argocd app sync {app_name} --grpc-web",
-        cwd=repo_path,
-    )
+    # If argocd CLI is unavailable, rely on automated sync policy in the Application manifest.
+    # This keeps local environments functional while still applying the ArgoCD resource.
+    if shutil.which("argocd") is None:
+        output = (
+            f"{helm_output}\n{kubectl_output}\n"
+            "argocd CLI not found; skipping manual app sync and relying on ArgoCD automated sync policy"
+        )
+        return ToolResult(
+            ok=True,
+            step="deploy",
+            details="deploy executed without argocd cli",
+            output=output,
+            artifact_ref="manifests://helm-argocd",
+        )
+
+    sync_ok, sync_output = run_command(f"argocd app sync {app_name} --grpc-web", cwd=repo_path)
     output = f"{helm_output}\n{kubectl_output}\n{sync_output}"
     return ToolResult(
         ok=sync_ok,

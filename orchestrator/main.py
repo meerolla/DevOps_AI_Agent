@@ -42,6 +42,15 @@ def _render_pause_instruction(state: PipelineState) -> str:
     )
 
 
+def _render_failure_summary(state: PipelineState) -> str:
+    failed_steps = [step for step, outcome in state.step_status.items() if outcome in {"failed", "escalated"}]
+    if failed_steps:
+        return f"Failed steps: {', '.join(failed_steps)}"
+    if state.paused_for:
+        return f"Pipeline paused for approval: {state.paused_for}"
+    return "No explicit failed step captured"
+
+
 def run_command(
     repo: str,
     goal: str,
@@ -82,6 +91,7 @@ def run_command(
 
     print("Pipeline did not fully complete.")
     print(f"Escalation: {final_state.escalate_reason or 'approval not granted or step failure'}")
+    print(_render_failure_summary(final_state))
     print(f"Audit log: {audit_path}")
     return 1
 
@@ -154,6 +164,7 @@ def main() -> int:
 
         print("Pipeline did not fully complete.")
         print(f"Escalation: {final_state.escalate_reason or 'approval not granted or step failure'}")
+        print(_render_failure_summary(final_state))
         return 1
 
     parser.print_help()

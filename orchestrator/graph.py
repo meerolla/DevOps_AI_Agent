@@ -137,6 +137,8 @@ def _node_provision(state: OrchestratorGraphState) -> OrchestratorGraphState:
         )
         pipeline_state.mark_step("provision", "ok" if provision.ok else "failed")
         append_audit(pipeline_state, "provision", "run", "ok" if provision.ok else "failed", provision.output)
+        if not provision.ok and not pipeline_state.escalate_reason:
+            pipeline_state.escalate_reason = f"provision failed: {provision.details}"
     return state
 
 
@@ -165,6 +167,8 @@ def _node_deploy(state: OrchestratorGraphState) -> OrchestratorGraphState:
         pipeline_state.manifests_ref = deploy_result.artifact_ref
         pipeline_state.mark_step("deploy", "ok" if deploy_result.ok else "failed")
         append_audit(pipeline_state, "deploy", "run", "ok" if deploy_result.ok else "failed", deploy_result.output)
+        if not deploy_result.ok and not pipeline_state.escalate_reason:
+            pipeline_state.escalate_reason = f"deploy failed: {deploy_result.details}"
     return state
 
 
