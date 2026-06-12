@@ -128,3 +128,21 @@ class PipelineState(BaseModel):
     def clear_pause(self) -> None:
         self.paused_for = None
         self.pending_approval_summary = None
+
+    def retry_from_step(self, from_step: StepName) -> None:
+        """Reset escalation state and mark all steps from from_step onward as pending.
+
+        Preserves completed earlier steps (plan, dockerize, build, etc.) so the
+        pipeline resumes mid-flow without re-running expensive steps.
+        """
+        _ORDER: list[StepName] = [
+            "plan", "dockerize", "build", "test", "scan",
+            "approve_infra", "provision", "approve_deploy", "deploy", "healthcheck",
+        ]
+        reset_from = _ORDER.index(from_step)
+        for step in _ORDER[reset_from:]:
+            self.step_status[step] = "pending"
+            self.retries.pop(step, None)
+        self.escalate_reason = None
+        self.last_fix_proposal = None
+        self.last_failed_step = None

@@ -125,6 +125,16 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--repo", required=True, help="Repository path")
     resume_parser.add_argument("--auto-approve", action="store_true", help="Auto approve remaining gates")
 
+    retry_parser = sub.add_parser("retry", help="Retry pipeline from a specific step after manual fix")
+    retry_parser.add_argument("--repo", required=True, help="Repository path")
+    retry_parser.add_argument(
+        "--from-step",
+        required=True,
+        choices=["test", "scan", "approve_infra", "provision", "approve_deploy", "deploy", "healthcheck"],
+        help="Step to resume from (resets this step and all subsequent steps)",
+    )
+    retry_parser.add_argument("--auto-approve", action="store_true", help="Auto approve remaining gates")
+
     return parser
 
 
@@ -172,6 +182,31 @@ def main() -> int:
 
         print("Pipeline did not fully complete.")
         print(f"Escalation: {final_state.escalate_reason or 'approval not granted or step failure'}")
+        print(_render_failure_summary(final_state))
+        return 1
+
+    if args.command == "retry":
+        state = _load_state(args.repo)
+        state.retry_from_step(args.from_step)  # type: ignore[arg-type]
+        _save_state(state)
+        print(f"State reset from step '{args.from_step}'. Resuming pipeline...")
+        final_state = run_pipeline(state, auto_approve=args.auto_approve)
+
+        audit_path = Path(args.repo) / ".orchestrator_audit.log"
+        write_audit_log(final_state, audit_path)
+        _save_state(final_state)
+
+        if final_state.paused_for:
+            print(_render_pause_instruction(final_state))
+            return 2
+
+        all_ok = all(status == "ok" for status in final_state.step_status.values())
+        if all_ok:
+            print("Pipeline completed successfully.")
+            return 0
+
+        print("Pipeline did not fully complete.")
+        print(f"Escalation: {final_state.escalate_reason or 'step failure'}")
         print(_render_failure_summary(final_state))
         return 1
 

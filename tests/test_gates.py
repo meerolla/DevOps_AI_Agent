@@ -53,3 +53,25 @@ def test_state_persistence_for_pause(tmp_path: Path) -> None:
     state = PipelineState(goal="demo", repo_ref=str(tmp_path), paused_for="approve_infra")
     state_path = _save_state(state)
     assert state_path.exists()
+
+
+def test_retry_from_step_resets_escalated_state(tmp_path: Path) -> None:
+    state = PipelineState(goal="demo", repo_ref=str(tmp_path))
+    # Simulate pipeline that escalated at test
+    state.step_status["plan"] = "ok"
+    state.step_status["dockerize"] = "ok"
+    state.step_status["build"] = "ok"
+    state.step_status["test"] = "escalated"
+    state.escalate_reason = "Test failure requires developer attention"
+    state.retries["test"] = 2
+
+    state.retry_from_step("test")
+
+    # steps before test are preserved
+    assert state.step_status["plan"] == "ok"
+    assert state.step_status["build"] == "ok"
+    # test and all subsequent steps are reset
+    for step in ["test", "scan", "approve_infra", "provision", "approve_deploy", "deploy", "healthcheck"]:
+        assert state.step_status[step] == "pending"
+    assert state.escalate_reason is None
+    assert state.retries.get("test") is None
