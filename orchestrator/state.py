@@ -19,6 +19,7 @@ StepName = Literal[
 ]
 StepOutcome = Literal["pending", "ok", "failed", "escalated"]
 PauseReason = Literal["approve_infra", "approve_deploy"]
+FixType = Literal["infra_hint", "config_hint", "tool_retry", "escalate"]
 
 
 class BuildPlan(BaseModel):
@@ -39,6 +40,8 @@ class FixProposal(BaseModel):
     change_summary: str
     retry_step: StepName
     escalated: bool = False
+    fix_type: FixType = "escalate"
+    hint: str = ""  # actionable operator message
 
 
 class ToolResult(BaseModel):
@@ -99,6 +102,7 @@ class PipelineState(BaseModel):
     retry_limit: int = 2
     last_failed_step: Optional[StepName] = None
     escalate_reason: Optional[str] = None
+    last_fix_proposal: Optional[FixProposal] = None
     paused_for: Optional[PauseReason] = None
     pending_approval_summary: Optional[str] = None
     state_file_ref: Optional[str] = None

@@ -44,11 +44,19 @@ def _render_pause_instruction(state: PipelineState) -> str:
 
 def _render_failure_summary(state: PipelineState) -> str:
     failed_steps = [step for step, outcome in state.step_status.items() if outcome in {"failed", "escalated"}]
+    lines = []
     if failed_steps:
-        return f"Failed steps: {', '.join(failed_steps)}"
-    if state.paused_for:
-        return f"Pipeline paused for approval: {state.paused_for}"
-    return "No explicit failed step captured"
+        lines.append(f"Failed steps: {', '.join(failed_steps)}")
+    elif state.paused_for:
+        lines.append(f"Pipeline paused for approval: {state.paused_for}")
+    else:
+        lines.append("No explicit failed step captured")
+    if state.last_fix_proposal:
+        p = state.last_fix_proposal
+        lines.append(f"Diagnosis [{p.fix_type}]: {p.root_cause}")
+        if p.hint:
+            lines.append(f"Suggested action: {p.hint}")
+    return "\n".join(lines)
 
 
 def run_command(

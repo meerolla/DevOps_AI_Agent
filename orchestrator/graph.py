@@ -286,8 +286,10 @@ def _step_with_retries(
     run_step: Callable[[], tuple[bool, str]],
     repo_path: Path,
 ) -> bool:
+    last_output = ""
     while True:
         ok, output = run_step()
+        last_output = output
         append_audit(state, step, "run", "ok" if ok else "failed", output)
         if ok:
             state.mark_step(step, "ok")
@@ -295,12 +297,22 @@ def _step_with_retries(
 
         state.mark_step(step, "failed")
         state.add_retry(step)
-        proposal = apply_fix_for_failure(repo_path, step, output)
-        append_audit(state, "diagnose_fix", "propose_fix", "ok" if not proposal.escalated else "escalated", proposal.change_summary)
+        proposal = apply_fix_for_failure(repo_path, step, output, state)
+        state.last_fix_proposal = proposal
+        append_audit(
+            state,
+            "diagnose_fix",
+            "propose_fix",
+            "ok" if not proposal.escalated else "escalated",
+            f"fix_type={proposal.fix_type} | {proposal.change_summary}",
+        )
 
         if proposal.escalated or state.retries.get(step, 0) > state.retry_limit:
             state.mark_step(step, "escalated")
-            state.escalate_reason = proposal.root_cause
+            if proposal.root_cause == "Unknown deterministic failure" and last_output.strip():
+                state.escalate_reason = f"{step} failed: {last_output.splitlines()[0][:240]}"
+            else:
+                state.escalate_reason = proposal.root_cause
             return False
 
 
