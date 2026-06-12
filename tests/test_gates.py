@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from orchestrator.main import _save_state
 from orchestrator.state import PipelineState
 from orchestrator.tools.deploy import deploy
 from orchestrator.tools.infra import provision_infra
@@ -8,6 +9,7 @@ from orchestrator.tools.infra import provision_infra
 def test_provision_requires_approval_and_plan(tmp_path: Path) -> None:
     result_no_plan = provision_infra(
         repo_path=tmp_path,
+        cluster="default",
         namespace="demo",
         secret_names=["ghcr-pull-secret"],
         approved=True,
@@ -18,6 +20,7 @@ def test_provision_requires_approval_and_plan(tmp_path: Path) -> None:
 
     result_no_approval = provision_infra(
         repo_path=tmp_path,
+        cluster="default",
         namespace="demo",
         secret_names=["ghcr-pull-secret"],
         approved=False,
@@ -28,7 +31,14 @@ def test_provision_requires_approval_and_plan(tmp_path: Path) -> None:
 
 
 def test_deploy_requires_approval(tmp_path: Path) -> None:
-    result = deploy(tmp_path, "ghcr.io/demo/sample:latest", "demo", approved=False)
+    result = deploy(
+        repo_path=tmp_path,
+        image_ref="ghcr.io/demo/sample:latest",
+        namespace="demo",
+        cluster="default",
+        app_name="sample",
+        approved=False,
+    )
     assert not result.ok
     assert "approval" in result.details
 
@@ -37,3 +47,9 @@ def test_state_defaults_to_no_approvals(tmp_path: Path) -> None:
     state = PipelineState(goal="demo", repo_ref=str(tmp_path))
     assert state.approvals.infra is False
     assert state.approvals.deploy is False
+
+
+def test_state_persistence_for_pause(tmp_path: Path) -> None:
+    state = PipelineState(goal="demo", repo_ref=str(tmp_path), paused_for="approve_infra")
+    state_path = _save_state(state)
+    assert state_path.exists()

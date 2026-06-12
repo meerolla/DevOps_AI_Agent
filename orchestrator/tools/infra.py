@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 from orchestrator.state import ToolResult
@@ -11,8 +13,23 @@ def build_infra_plan(namespace: str, secret_names: list[str]) -> str:
     return f"Create/ensure namespace={namespace}; ensure imagePullSecrets={secrets}"
 
 
+def _dockerconfigjson() -> str:
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GHCR_TOKEN", "")
+    payload = {
+        "auths": {
+            "ghcr.io": {
+                "username": "oauth2",
+                "password": token,
+                "auth": "",
+            }
+        }
+    }
+    return json.dumps(payload)
+
+
 def provision_infra(
     repo_path: Path,
+    cluster: str,
     namespace: str,
     secret_names: list[str],
     approved: bool,
@@ -37,6 +54,29 @@ def provision_infra(
     if is_sandbox():
         return ToolResult(ok=True, step="provision", details="sandbox infra applied", output=plan)
 
-    ok, output = run_command(f"kubectl create namespace {namespace} --dry-run=client -o yaml", cwd=repo_path)
-    merged_output = f"{plan}\n{output}"
-    return ToolResult(ok=ok, step="provision", details="infra provision command executed", output=merged_output)
+    outputs: list[str] = []
+
+    ns_ok, ns_output = run_command(
+        f"kubectl --context {cluster} create namespace {namespace} --dry-run=client -o yaml | kubectl --context {cluster} apply -f -",
+        cwd=repo_path,
+    )
+    outputs.append(ns_output)
+    if not ns_ok:
+        return ToolResult(ok=False, step="provision", details="namespace apply failed", output="\n".join(outputs))
+
+    for secret_name in secret_names:
+        secret_ok, secret_output = run_command(
+            (
+                f"kubectl --context {cluster} -n {namespace} create secret generic {secret_name} "
+                f"--from-literal=.dockerconfigjson='{_dockerconfigjson()}' "
+                "--type=kubernetes.io/dockerconfigjson --dry-run=client -o yaml "
+                f"| kubectl --context {cluster} -n {namespace} apply -f -"
+            ),
+            cwd=repo_path,
+        )
+        outputs.append(secret_output)
+        if not secret_ok:
+            return ToolResult(ok=False, step="provision", details="secret apply failed", output="\n".join(outputs))
+
+    merged_output = f"{plan}\n" + "\n".join(outputs)
+    return ToolResult(ok=True, step="provision", details="infra provision command executed", output=merged_output)

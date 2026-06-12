@@ -28,8 +28,10 @@ a typed state object = the shared `PipelineState`. The orchestrator stays thin â
 ## Module layout
 ```
 orchestrator/
-  graph.py          # the LangGraph: nodes, edges, interrupts (the orchestrator)
+  graph.py          # pipeline orchestration flow + pause/resume gates
   state.py          # PipelineState + artifact models
+  artifacts.py      # deterministic repo artifact generation
+  gitops.py         # auto-commit generated artifacts
   agents/
     planner.py      # Planner agent
     dockerizer.py   # Dockerizer agent
@@ -43,27 +45,27 @@ orchestrator/
     health.py       # healthcheck
   llm.py            # provider selection + mock mode
   audit.py          # structured, secret-safe audit log
-  main.py           # CLI: run --repo <path> --goal "..."
+  main.py           # CLI: run/approve/resume
 tests/
   fixtures/sample-repo/   # seeded app with a known test failure
   test_agents_mock.py
   test_gates.py
 ```
 
-## The graph (graph.py)
-Nodes: `plan -> dockerize -> build -> test -> scan -> approve_infra(interrupt) -> provision ->
-approve_deploy(interrupt) -> deploy -> healthcheck`.
+## The orchestrator flow (graph.py)
+Nodes: `plan -> dockerize -> build -> test -> scan -> approve_infra -> provision ->
+approve_deploy -> deploy -> healthcheck`.
 - Conditional edge after build/test/scan/healthcheck: on failure -> `diagnose_fix` -> back to the failed
   node (bounded retries; then escalate).
-- `approve_infra` and `approve_deploy` use `interrupt()` to pause for human input; `provision`/`deploy`
-  run only after approval is recorded in state.
+- `approve_infra` and `approve_deploy` are explicit CLI pause points backed by persisted state in
+  `.orchestrator_state.json`; `provision`/`deploy` run only after approval is recorded.
 
 ## Tools (deterministic, target-aware)
 Each tool is a typed function that shells out and returns a structured result. On the on-prem path,
-`provision_infra` ensures the namespace + secrets and returns that change set for the gate (no
-Terraform). On the AWS path it runs `terraform plan` and returns the plan before any `apply`. In
-`SANDBOX=1`, the cluster is a local **k3d/kind** and infra is stubbed. No tool embeds an LLM call.
-`build_image`/`deploy` push to and pull from **GHCR** by default (GitHub-token auth).
+`provision_infra` produces a change set for namespace + GHCR image pull secret and applies only after
+approval. `build_image` builds and pushes to **GHCR** (GitHub-token auth), `deploy` uses Helm and
+ArgoCD application sync, and `healthcheck` validates deployment readiness. In `SANDBOX=1`, commands
+are deterministic stubs. No tool embeds an LLM call.
 
 ## Guardrails (enforced in code)
 - No destructive tool (`apply`, `deploy`) runs unless `state.approvals.<x>` is true.
@@ -73,5 +75,19 @@ Terraform). On the AWS path it runs `terraform plan` and returns the plan before
 
 ## Run & test
 - Setup (once): `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
-- Run (venv active): `python -m orchestrator.main run --repo <path> --goal "set up CI/CD and deploy"`
+- Run (venv active): `python -m orchestrator.main run --repo <path> --cluster <context> --registry <ghcr-ref> --namespace <ns> --goal "set up CI/CD and deploy"`
+- Approve paused gate: `python -m orchestrator.main approve --repo <path> --step infra|deploy`
+- Resume paused run: `python -m orchestrator.main resume --repo <path>`
 - Test (venv active): `SANDBOX=1 LLM_MODE=mock pytest -q`
+
+## Generated artifacts
+For the target app repo, the orchestrator generates:
+- `Dockerfile`
+- `.github/workflows/ci.yml`
+- `.github/workflows/ci-self-heal.yml`
+- `helm/Chart.yaml`
+- `helm/values.yaml`
+- `helm/templates/deployment.yaml`
+- `argocd/application.yaml`
+
+On successful completion, artifacts are auto-committed.

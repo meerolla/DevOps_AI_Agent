@@ -13,7 +13,9 @@ pip install -r requirements.txt
 ## Run
 
 ```bash
-python -m orchestrator.main run --repo ./tests/fixtures/sample-repo --goal "set up CI/CD and deploy"
+python -m orchestrator.main run --repo ./tests/fixtures/sample-repo --cluster default --registry ghcr.io/demo/sample --namespace my-app --goal "set up CI/CD and deploy"
+python -m orchestrator.main approve --repo ./tests/fixtures/sample-repo --step infra
+python -m orchestrator.main resume --repo ./tests/fixtures/sample-repo
 ```
 
 ## Test
