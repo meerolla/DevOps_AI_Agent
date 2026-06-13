@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -19,6 +21,97 @@ def auto_commit_generated_artifacts(repo_path: Path, paths: Iterable[Path], mess
 
     ok_commit, out_commit = run_command(f'git commit -m "{message}"', cwd=repo_path)
     if not ok_commit:
+        if "nothing to commit" in out_commit.lower():
+            return True, "nothing to commit"
         return False, out_commit
 
     return True, out_commit
+
+
+def _detect_default_branch(repo_path: Path) -> tuple[bool, str]:
+    ok, output = run_command("git symbolic-ref refs/remotes/origin/HEAD", cwd=repo_path)
+    if ok and output.strip():
+        # output like: refs/remotes/origin/main
+        return True, output.strip().split("/")[-1]
+    # fallback to common default branch
+    ok_main, _ = run_command("git rev-parse --verify origin/main", cwd=repo_path)
+    if ok_main:
+        return True, "main"
+    ok_master, _ = run_command("git rev-parse --verify origin/master", cwd=repo_path)
+    if ok_master:
+        return True, "master"
+    return False, "could not detect default branch"
+
+
+def create_draft_pr_for_generated_artifacts(
+    repo_path: Path,
+    branch_name: str,
+    title: str,
+    body: str,
+) -> tuple[bool, str]:
+    if is_sandbox():
+        return True, "sandbox draft-pr skipped"
+
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if not token:
+        return False, "GITHUB_TOKEN (or GH_TOKEN) is required to create a draft PR"
+
+    ok_branch, out_branch = run_command(f"git checkout -b {branch_name}", cwd=repo_path)
+    if not ok_branch and "already exists" not in out_branch.lower():
+        return False, out_branch
+    if "already exists" in out_branch.lower():
+        ok_switch, out_switch = run_command(f"git checkout {branch_name}", cwd=repo_path)
+        if not ok_switch:
+            return False, out_switch
+
+    ok_push, out_push = run_command(f"git push -u origin {branch_name}", cwd=repo_path)
+    if not ok_push:
+        return False, out_push
+
+    ok_default, default_branch = _detect_default_branch(repo_path)
+    if not ok_default:
+        return False, default_branch
+
+    ok_remote, remote_url = run_command("git remote get-url origin", cwd=repo_path)
+    if not ok_remote:
+        return False, remote_url
+
+    remote = remote_url.strip()
+    owner_repo = ""
+    if remote.startswith("git@github.com:"):
+        owner_repo = remote.replace("git@github.com:", "").replace(".git", "")
+    elif "github.com/" in remote:
+        owner_repo = remote.split("github.com/")[-1].replace(".git", "")
+    if not owner_repo or "/" not in owner_repo:
+        return False, f"could not parse GitHub owner/repo from origin URL: {remote}"
+
+    payload = json.dumps(
+        {
+            "title": title,
+            "head": branch_name,
+            "base": default_branch,
+            "body": body,
+            "draft": True,
+        }
+    )
+    api_url = f"https://api.github.com/repos/{owner_repo}/pulls"
+    cmd = (
+        "curl -sS -X POST "
+        f"-H \"Authorization: Bearer {token}\" "
+        "-H \"Accept: application/vnd.github+json\" "
+        f"{api_url} "
+        f"-d '{payload}'"
+    )
+    ok_pr, out_pr = run_command(cmd, cwd=repo_path)
+    if not ok_pr:
+        return False, out_pr
+
+    try:
+        data = json.loads(out_pr)
+    except Exception:
+        return False, out_pr
+
+    if "html_url" in data:
+        return True, data["html_url"]
+    message = data.get("message", "unknown GitHub API error")
+    return False, message

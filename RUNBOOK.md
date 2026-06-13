@@ -50,8 +50,9 @@ The orchestrator then:
 3. **Test** + **Scan** (tools). Failure → **Diagnose-Fix** (agent) proposes a fix → retry that step.
 4. **[GATE]** approve provision → creates namespace + secrets (no Terraform on-prem).
 5. **[GATE]** approve deploy → **Helm + ArgoCD** sync to the k3d cluster → **Healthcheck**.
-6. Commits into the repo: Dockerfile, CI workflow, Helm chart, ArgoCD Application, **and the Stage-3
-   CI Self-Heal workflow** (+ the GHCR/LLM secrets references).
+6. Commits generated assets and opens a **draft PR** by default (requires `GITHUB_TOKEN` with `repo`
+      scope): Dockerfile, CI workflow, Helm chart, ArgoCD Application, **and the Stage-3 CI Self-Heal
+      workflow** (+ the GHCR/LLM secrets references). Use `--no-draft-pr` to disable this behavior.
 
 **Done when:** the app is live and healthy in the k3d cluster and the repo carries its pipeline + the
 CI Self-Heal workflow.
