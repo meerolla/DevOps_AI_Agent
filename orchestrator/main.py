@@ -67,6 +67,7 @@ def run_command(
     namespace: str,
     auto_approve: bool,
     auto_commit: bool,
+    auto_draft_pr: bool,
 ) -> int:
     state = PipelineState(
         goal=goal,
@@ -76,6 +77,7 @@ def run_command(
         namespace=namespace,
         app_name=Path(registry.split(":")[0]).name,
         auto_commit=auto_commit,
+        auto_draft_pr=auto_draft_pr,
     )
     final_state = run_pipeline(state, auto_approve=auto_approve)
 
@@ -94,6 +96,8 @@ def run_command(
         print("Pipeline completed successfully.")
         if final_state.commit_sha:
             print(f"Auto-commit result: {final_state.commit_sha}")
+        if final_state.pr_url:
+            print(f"Draft PR: {final_state.pr_url}")
         print(f"Audit log: {audit_path}")
         return 0
 
@@ -116,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--goal", default="given an app repo, set up CI/CD and deploy it", help="Goal description")
     run_parser.add_argument("--auto-approve", action="store_true", help="Auto approve both gates")
     run_parser.add_argument("--no-auto-commit", action="store_true", help="Disable auto-commit of generated artifacts")
+    run_parser.add_argument("--no-draft-pr", action="store_true", help="Disable automatic draft PR creation")
 
     approve_parser = sub.add_parser("approve", help="Approve a paused gate")
     approve_parser.add_argument("--repo", required=True, help="Repository path")
@@ -151,6 +156,7 @@ def main() -> int:
             namespace=args.namespace,
             auto_approve=args.auto_approve,
             auto_commit=not args.no_auto_commit,
+            auto_draft_pr=not args.no_draft_pr,
         )
 
     if args.command == "approve":

@@ -74,6 +74,7 @@ class PipelineState(BaseModel):
     app_name: str = "app"
     pull_secret_name: str = "ghcr-pull-secret"
     auto_commit: bool = True
+    auto_draft_pr: bool = True
     build_plan: Optional[BuildPlan] = None
     dockerfile_ref: Optional[str] = None
     image_ref: Optional[str] = None
@@ -107,6 +108,7 @@ class PipelineState(BaseModel):
     pending_approval_summary: Optional[str] = None
     state_file_ref: Optional[str] = None
     commit_sha: Optional[str] = None
+    pr_url: Optional[str] = None
 
     def mark_step(self, step: StepName, outcome: StepOutcome) -> None:
         self.step_status[step] = outcome
