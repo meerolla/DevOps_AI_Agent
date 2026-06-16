@@ -49,10 +49,11 @@ def test_generated_post_merge_activation_workflow(tmp_path: Path) -> None:
     assert "push:" in workflow_text
     assert "branches: [main]" in workflow_text
     assert "runs-on: [self-hosted]" in workflow_text
-    assert "python -m orchestrator.main activate" in workflow_text
-    assert "--cluster \"default\"" in workflow_text
+    assert "helm upgrade --install" in workflow_text
+    assert "kubectl --context \"default\" apply -f deploy/argocd/application.yaml" in workflow_text
+    assert "argocd app sync \"$APP_NAME\" --grpc-web" in workflow_text
+    assert "--kube-context \"default\"" in workflow_text
     assert "--namespace \"my-app\"" in workflow_text
-    assert "--auto-approve-deploy" in workflow_text
     assert "vars.KUBE_CONTEXT" not in workflow_text
     assert "vars.APP_NAMESPACE" not in workflow_text
 

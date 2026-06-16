@@ -252,20 +252,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install deps
-        run: pip install -r requirements.txt
       - name: Resolve image repository
         run: |
           repo=$(python .github/scripts/helm_values.py get-repository --file deploy/helm/values.yaml)
           echo "IMAGE_REPOSITORY=$repo" >> "$GITHUB_ENV"
-      - name: Activate post-merge deploy
+      - name: Resolve application name
         run: |
-          python -m orchestrator.main activate \
-            --repo . \
-            --cluster "__CLUSTER__" \
-            --registry "$IMAGE_REPOSITORY" \
-            --namespace "__NAMESPACE__" \
-            --auto-approve-deploy
+          app_name=$(basename "$GITHUB_REPOSITORY")
+          echo "APP_NAME=$app_name" >> "$GITHUB_ENV"
+      - name: Helm deploy
+        run: |
+          helm upgrade --install "$APP_NAME" ./deploy/helm \
+            --namespace "__NAMESPACE__" --create-namespace \
+            --kube-context "__CLUSTER__" \
+            --set image.repository="$IMAGE_REPOSITORY" \
+            --set image.tag="${GITHUB_SHA}"
+      - name: Apply ArgoCD application
+        run: kubectl --context "__CLUSTER__" apply -f deploy/argocd/application.yaml
+      - name: Optional ArgoCD sync
+        run: |
+          if command -v argocd >/dev/null 2>&1; then
+            argocd app sync "$APP_NAME" --grpc-web
+          else
+            echo "argocd CLI not found on runner; relying on automated sync policy"
+          fi
 """
     return workflow.replace("__CLUSTER__", cluster).replace("__NAMESPACE__", namespace)
 
