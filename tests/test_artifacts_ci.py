@@ -2,6 +2,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import yaml
+
 from orchestrator.artifacts import generate_pipeline_artifacts
 from orchestrator.state import BuildPlan, PipelineState
 
@@ -31,6 +33,7 @@ def test_generated_ci_workflow_has_pr_and_main_tracks(tmp_path: Path) -> None:
     assert "github.event_name == 'push'" in ci_text
     assert "docker/login-action@v3" in ci_text
     assert "helm_values.py set-tag" in ci_text
+    assert "deploy/helm/values.yaml" in ci_text
     assert "[skip ci]" in ci_text
 
 
@@ -43,7 +46,7 @@ def test_generated_helm_values_helper_updates_tag(tmp_path: Path) -> None:
     helper_path = tmp_path / ".github" / "scripts" / "helm_values.py"
     assert helper_path.exists()
 
-    values_path = tmp_path / "helm" / "values.yaml"
+    values_path = tmp_path / "deploy" / "helm" / "values.yaml"
     original = values_path.read_text(encoding="utf-8")
     assert "tag: latest" in original
 
@@ -61,3 +64,93 @@ def test_generated_helm_values_helper_updates_tag(tmp_path: Path) -> None:
 
     updated = values_path.read_text(encoding="utf-8")
     assert "tag: abc123" in updated
+
+
+def test_generated_yaml_is_valid_for_non_template_files(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", framework="fastapi", ports=[8080], test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    for file_path in [
+        tmp_path / "deploy" / "helm" / "Chart.yaml",
+        tmp_path / "deploy" / "helm" / "values.yaml",
+        tmp_path / "deploy" / "argocd" / "application.yaml",
+        tmp_path / ".github" / "workflows" / "ci.yml",
+        tmp_path / ".github" / "workflows" / "ci-self-heal.yml",
+    ]:
+        yaml.safe_load(file_path.read_text(encoding="utf-8"))
+
+
+def test_generated_argocd_repo_url_is_git(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", framework="fastapi", ports=[8080], test_command="pytest -q")
+
+    subprocess.check_call(["git", "init"], cwd=tmp_path)
+    subprocess.check_call(["git", "remote", "add", "origin", "https://github.com/acme/demo.git"], cwd=tmp_path)
+
+    generate_pipeline_artifacts(state, plan)
+    app = yaml.safe_load((tmp_path / "deploy" / "argocd" / "application.yaml").read_text(encoding="utf-8"))
+    repo_url = app["spec"]["source"]["repoURL"]
+    assert not repo_url.startswith("file://")
+    assert "github.com" in repo_url
+
+
+def test_generated_ports_are_consistent(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", framework="fastapi", ports=[8080], test_command="pytest -q")
+
+    generate_pipeline_artifacts(state, plan)
+
+    values_text = (tmp_path / "deploy" / "helm" / "values.yaml").read_text(encoding="utf-8")
+    deployment_text = (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+    docker_text = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "containerPort: 8080" in values_text
+    assert "port: 8080" in values_text
+    assert "containerPort: {{ .Values.containerPort }}" in deployment_text
+    assert "EXPOSE 8080" in docker_text
+
+
+def test_generated_deployment_has_health_probes(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", framework="fastapi", ports=[8080], test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    deployment_text = (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+    assert "livenessProbe:" in deployment_text
+    assert "readinessProbe:" in deployment_text
+    assert "path: {{ .Values.healthPath | default \"/health\" }}" in deployment_text
+
+
+def test_helm_values_helper_updates_only_image_tag(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", framework="fastapi", ports=[8080], test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    helper_path = tmp_path / ".github" / "scripts" / "helm_values.py"
+    values_path = tmp_path / "deploy" / "helm" / "values.yaml"
+    values_path.write_text(
+        """image:
+  repository: ghcr.io/demo/sample
+  tag: old-tag
+
+sidecar:
+  tag: should-stay
+""",
+        encoding="utf-8",
+    )
+
+    subprocess.check_call(
+        [
+            sys.executable,
+            str(helper_path),
+            "set-tag",
+            "--file",
+            str(values_path),
+            "--tag",
+            "new-tag",
+        ]
+    )
+    updated = values_path.read_text(encoding="utf-8")
+    assert "tag: new-tag" in updated
+    assert "tag: should-stay" in updated

@@ -46,9 +46,9 @@ def test_diagnose_fix_does_not_write_outside_owned_artifacts(tmp_path: Path) -> 
 
     # allowed paths
     _assert_owned_artifact(tmp_path / "Dockerfile", tmp_path)
-    _assert_owned_artifact(tmp_path / "helm" / "values.yaml", tmp_path)
+    _assert_owned_artifact(tmp_path / "deploy" / "helm" / "values.yaml", tmp_path)
     _assert_owned_artifact(tmp_path / ".github" / "workflows" / "ci.yml", tmp_path)
-    _assert_owned_artifact(tmp_path / "argocd" / "application.yaml", tmp_path)
+    _assert_owned_artifact(tmp_path / "deploy" / "argocd" / "application.yaml", tmp_path)
 
     # disallowed paths
     with pytest.raises(ValueError):
@@ -115,8 +115,8 @@ def test_diagnose_fix_healthcheck_config_error_regenerates_helm(tmp_path: Path) 
 
     assert proposal.escalated is False
     assert proposal.fix_type == "config_hint"
-    assert (tmp_path / "helm" / "values.yaml").exists()
-    assert (tmp_path / "helm" / "templates" / "deployment.yaml").exists()
+    assert (tmp_path / "deploy" / "helm" / "values.yaml").exists()
+    assert (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").exists()
     assert not (tmp_path / "app.py").exists()
 
 
@@ -131,7 +131,7 @@ def test_diagnose_fix_deploy_config_error_regenerates_argocd(tmp_path: Path) -> 
 
     assert proposal.escalated is False
     assert proposal.fix_type == "config_hint"
-    assert (tmp_path / "argocd" / "application.yaml").exists()
+    assert (tmp_path / "deploy" / "argocd" / "application.yaml").exists()
     assert not (tmp_path / "app.py").exists()
 
 
@@ -191,8 +191,8 @@ def test_full_run_mock_sandbox_app_bug_escalates(tmp_path: Path) -> None:
     # pipeline artifacts were still generated before test ran
     assert (repo_copy / ".github" / "workflows" / "ci.yml").exists()
     assert (repo_copy / ".github" / "workflows" / "ci-self-heal.yml").exists()
-    assert (repo_copy / "helm" / "Chart.yaml").exists()
-    assert (repo_copy / "argocd" / "application.yaml").exists()
+    assert (repo_copy / "deploy" / "helm" / "Chart.yaml").exists()
+    assert (repo_copy / "deploy" / "argocd" / "application.yaml").exists()
 
     # audit log contains no secrets
     for entry in final_state.audit:

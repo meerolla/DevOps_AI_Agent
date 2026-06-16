@@ -18,6 +18,7 @@ from orchestrator.tools.health import healthcheck
 from orchestrator.tools.infra import build_infra_plan, provision_infra
 from orchestrator.tools.scan import scan_image
 from orchestrator.tools.test import run_tests
+from orchestrator.validators import validate_generated_artifacts
 
 
 class OrchestratorGraphState(TypedDict):
@@ -191,6 +192,34 @@ def _node_finalize(state: OrchestratorGraphState) -> OrchestratorGraphState:
 
     if pipeline_state.auto_commit and not pipeline_state.commit_sha:
         generated = generate_pipeline_artifacts(pipeline_state, pipeline_state.build_plan)
+
+        validation_errors = validate_generated_artifacts(str(repo_path))
+        if validation_errors:
+            details = "\n".join(validation_errors)
+            append_audit(pipeline_state, "deploy", "artifact_validation", "failed", details)
+            proposal = apply_fix_for_failure(repo_path, "deploy", details, pipeline_state)
+            pipeline_state.last_fix_proposal = proposal
+            append_audit(
+                pipeline_state,
+                "diagnose_fix",
+                "artifact_validation_fix",
+                "ok" if not proposal.escalated else "escalated",
+                f"fix_type={proposal.fix_type} | {proposal.change_summary}",
+            )
+            if proposal.escalated:
+                pipeline_state.escalate_reason = "artifact validation failed"
+                return state
+
+            generated = generate_pipeline_artifacts(pipeline_state, pipeline_state.build_plan)
+            validation_errors = validate_generated_artifacts(str(repo_path))
+            if validation_errors:
+                details = "\n".join(validation_errors)
+                append_audit(pipeline_state, "deploy", "artifact_validation", "failed", details)
+                pipeline_state.escalate_reason = "artifact validation failed after retry"
+                return state
+
+        append_audit(pipeline_state, "deploy", "artifact_validation", "ok", "all checks passed")
+
         ok_commit, commit_output = auto_commit_generated_artifacts(
             repo_path,
             generated,

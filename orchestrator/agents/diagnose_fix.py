@@ -8,7 +8,7 @@ from orchestrator.state import FixProposal, PipelineState, StepName
 
 # Only these paths (relative to repo root) may be written by Diagnose-Fix.
 # Application source code, tests, and orchestrator code are never touched.
-OWNED_ARTIFACT_DIRS = frozenset({"helm", ".github", "argocd"})
+OWNED_ARTIFACT_DIRS = frozenset({"helm", ".github", "argocd", "deploy"})
 OWNED_ARTIFACT_FILES = frozenset({"Dockerfile"})
 
 BLOCKED_PATTERNS = (
@@ -69,9 +69,17 @@ def _collect_diagnosis_context(repo_path: Path, failed_step: StepName) -> dict[s
         "build": ["Dockerfile", "requirements.txt", "package.json"],
         "test": ["pytest.ini", "package.json", "requirements.txt"],
         "scan": ["Dockerfile", "requirements.txt", "package.json"],
-        "provision": ["helm/values.yaml", "argocd/application.yaml"],
-        "deploy": ["helm/values.yaml", "helm/templates/deployment.yaml", "argocd/application.yaml"],
-        "healthcheck": ["helm/values.yaml", "helm/templates/deployment.yaml", "argocd/application.yaml"],
+        "provision": ["deploy/helm/values.yaml", "deploy/argocd/application.yaml"],
+        "deploy": [
+            "deploy/helm/values.yaml",
+            "deploy/helm/templates/deployment.yaml",
+            "deploy/argocd/application.yaml",
+        ],
+        "healthcheck": [
+            "deploy/helm/values.yaml",
+            "deploy/helm/templates/deployment.yaml",
+            "deploy/argocd/application.yaml",
+        ],
     }
     context: dict[str, str] = {}
     for relative_path in context_candidates.get(failed_step, []):

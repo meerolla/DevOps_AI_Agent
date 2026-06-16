@@ -35,7 +35,7 @@ def deploy(
     repo, tag = image_ref.rsplit(":", 1) if ":" in image_ref else (image_ref, "latest")
     helm_ok, helm_output = run_command(
         (
-            f"helm upgrade --install {app_name} ./helm --namespace {namespace} --create-namespace "
+            f"helm upgrade --install {app_name} ./deploy/helm --namespace {namespace} --create-namespace "
             f"--kube-context {cluster} --set image.repository={repo} --set image.tag={tag}"
         ),
         cwd=repo_path,
@@ -49,7 +49,7 @@ def deploy(
             artifact_ref=None,
         )
 
-    app_manifest = repo_path / "argocd" / "application.yaml"
+    app_manifest = repo_path / "deploy" / "argocd" / "application.yaml"
     kubectl_ok, kubectl_output = run_command(
         f"kubectl --context {cluster} apply -f {app_manifest}",
         cwd=repo_path,
