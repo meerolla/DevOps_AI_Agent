@@ -1,8 +1,54 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from orchestrator.state import BuildPlan, PipelineState
+from orchestrator.tools._shell import run_command
+
+
+def _resolve_port(plan: BuildPlan) -> int:
+  if plan.ports:
+    return int(plan.ports[0])
+  return 8000
+
+
+def _detect_health_path(repo: Path) -> str:
+  candidates = [repo / "app" / "main.py", repo / "main.py", repo / "app.py", repo / "src" / "index.js"]
+  for path in candidates:
+    if not path.exists():
+      continue
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for candidate in ("/health", "/healthz", "/status"):
+      if candidate in text:
+        return candidate
+  return "/health"
+
+
+def _git_remote_https_url(repo: Path) -> str:
+  ok, output = run_command("git remote get-url origin", cwd=repo)
+  if not ok or not output.strip():
+    return "https://github.com/example/repo.git"
+  remote = output.strip()
+  if remote.startswith("git@github.com:"):
+    owner_repo = remote.replace("git@github.com:", "")
+    return f"https://github.com/{owner_repo}"
+  return remote
+
+
+def _git_branch(repo: Path) -> str:
+  ok, output = run_command("git rev-parse --abbrev-ref HEAD", cwd=repo)
+  branch = output.strip() if ok and output.strip() else "main"
+  if branch == "HEAD":
+    return "main"
+  return branch
+
+
+def _git_short_sha(repo: Path) -> str:
+  ok, output = run_command("git rev-parse --short HEAD", cwd=repo)
+  if ok and output.strip():
+    return output.strip()
+  return "unknown"
 
 
 def _workflow_ci() -> str:
@@ -40,7 +86,7 @@ jobs:
           python-version: '3.12'
       - name: Resolve image repository from Helm values
         run: |
-          repo=$(python .github/scripts/helm_values.py get-repository --file helm/values.yaml)
+          repo=$(python .github/scripts/helm_values.py get-repository --file deploy/helm/values.yaml)
           echo "IMAGE_REPOSITORY=$repo" >> "$GITHUB_ENV"
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -54,12 +100,12 @@ jobs:
           docker push "${IMAGE_REPOSITORY}:${GITHUB_SHA}"
       - name: Bump Helm image tag
         run: |
-          python .github/scripts/helm_values.py set-tag --file helm/values.yaml --tag "${GITHUB_SHA}"
+          python .github/scripts/helm_values.py set-tag --file deploy/helm/values.yaml --tag "${GITHUB_SHA}"
       - name: Commit and push image tag bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add helm/values.yaml
+          git add deploy/helm/values.yaml
           git diff --cached --quiet && echo "No image tag change to commit" && exit 0
           git commit -m "chore(ci): bump image tag to ${GITHUB_SHA} [skip ci]"
           git push
@@ -79,26 +125,46 @@ def _read_lines(path: Path) -> list[str]:
 
 
 def _get_repository(path: Path) -> str:
-    for line in _read_lines(path):
-        stripped = line.strip()
-        if stripped.startswith("repository:"):
-            return stripped.split(":", 1)[1].strip().strip('"').strip("'")
-    raise ValueError(f"repository not found in {path}")
+  lines = _read_lines(path)
+  in_image = False
+  for line in lines:
+    stripped = line.strip()
+    if not in_image and stripped == "image:":
+      in_image = True
+      continue
+    if in_image:
+      if stripped == "":
+        continue
+      if not line.startswith((" ", "\t")):
+        break
+      if stripped.startswith("repository:"):
+        return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+  raise ValueError(f"image.repository not found in {path}")
 
 
 def _set_tag(path: Path, tag: str) -> None:
-    lines = _read_lines(path)
-    updated = False
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("tag:"):
-            prefix = line.split("tag:", 1)[0]
-            lines[idx] = f"{prefix}tag: {tag}\\n"
-            updated = True
-            break
-    if not updated:
-        raise ValueError(f"tag not found in {path}")
-    path.write_text("".join(lines), encoding="utf-8")
+  lines = _read_lines(path)
+  in_image = False
+  updated = False
+  for idx, line in enumerate(lines):
+    stripped = line.strip()
+    if not in_image and stripped == "image:":
+      in_image = True
+      continue
+    if in_image:
+      if stripped == "":
+        continue
+      if not line.startswith((" ", "\t")):
+        break
+      if stripped.startswith("tag:"):
+        indent = line[: len(line) - len(line.lstrip(" \t"))]
+        newline = "\\n" if line.endswith("\\n") else ""
+        lines[idx] = f"{indent}tag: {tag}{newline}"
+        updated = True
+        break
+  if not updated:
+    raise ValueError(f"image.tag not found in {path}")
+  path.write_text("".join(lines), encoding="utf-8")
 
 
 def main() -> int:
@@ -150,24 +216,26 @@ jobs:
 """
 
 
-def _helm_chart_yaml(app_name: str) -> str:
+def _helm_chart_yaml(app_name: str, app_version: str) -> str:
     return f"""apiVersion: v2
 name: {app_name}
 version: 0.1.0
-appVersion: \"latest\"
+appVersion: \"{app_version}\"
 """
 
 
-def _helm_values(registry: str, namespace: str) -> str:
+def _helm_values(registry: str, port: int, health_path: str) -> str:
     repo, tag = registry.rsplit(":", 1) if ":" in registry else (registry, "latest")
     return f"""image:
   repository: {repo}
   tag: {tag}
 
-namespace: {namespace}
+containerPort: {port}
+healthPath: {health_path}
 
 service:
-  port: 8000
+  type: ClusterIP
+  port: {port}
 """
 
 
@@ -187,27 +255,42 @@ spec:
         app: {app_name}
     spec:
       imagePullSecrets:
-      - name: {pull_secret_name}
+        - name: {pull_secret_name}
       containers:
-      - name: {app_name}
-        image: \"{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}\"
-        ports:
-        - containerPort: 8000
+        - name: {app_name}
+          image: \"{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}\"
+          ports:
+            - containerPort: {{{{ .Values.containerPort }}}}
+          livenessProbe:
+            httpGet:
+              path: {{{{ .Values.healthPath | default \"/health\" }}}}
+              port: {{{{ .Values.containerPort }}}}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: {{{{ .Values.healthPath | default \"/health\" }}}}
+              port: {{{{ .Values.containerPort }}}}
+            initialDelaySeconds: 5
+            periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: {app_name}
 spec:
+  type: {{{{ .Values.service.type | default \"ClusterIP\" }}}}
   selector:
     app: {app_name}
   ports:
-  - port: 8000
-    targetPort: 8000
+    - port: {{{{ .Values.service.port | default .Values.containerPort }}}}
+      targetPort: {{{{ .Values.containerPort }}}}
+      protocol: TCP
+      name: http
 """
 
 
-def _argocd_application(app_name: str, namespace: str) -> str:
+def _argocd_application(app_name: str, namespace: str, repo_url: str, revision: str) -> str:
     return f"""apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -216,9 +299,9 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: file://.
-    targetRevision: HEAD
-    path: helm
+    repoURL: {repo_url}
+    targetRevision: {revision}
+    path: deploy/helm
   destination:
     server: https://kubernetes.default.svc
     namespace: {namespace}
@@ -232,10 +315,12 @@ spec:
 def regenerate_helm_config(state: PipelineState) -> list[Path]:
     """Re-render helm/values.yaml and helm/templates/deployment.yaml from current state."""
     repo = Path(state.repo_ref)
-    (repo / "helm" / "templates").mkdir(parents=True, exist_ok=True)
-    values_path = repo / "helm" / "values.yaml"
-    values_path.write_text(_helm_values(state.image_ref_for_registry(), state.namespace), encoding="utf-8")
-    deployment_path = repo / "helm" / "templates" / "deployment.yaml"
+    (repo / "deploy" / "helm" / "templates").mkdir(parents=True, exist_ok=True)
+    port = _resolve_port(state.build_plan) if state.build_plan else 8000
+    health_path = _detect_health_path(repo)
+    values_path = repo / "deploy" / "helm" / "values.yaml"
+    values_path.write_text(_helm_values(state.image_ref_for_registry(), port, health_path), encoding="utf-8")
+    deployment_path = repo / "deploy" / "helm" / "templates" / "deployment.yaml"
     deployment_path.write_text(_helm_deployment(state.app_name, state.pull_secret_name), encoding="utf-8")
     return [values_path, deployment_path]
 
@@ -243,20 +328,27 @@ def regenerate_helm_config(state: PipelineState) -> list[Path]:
 def regenerate_argocd_application(state: PipelineState) -> Path:
     """Re-render argocd/application.yaml from current state."""
     repo = Path(state.repo_ref)
-    (repo / "argocd").mkdir(parents=True, exist_ok=True)
-    argocd_path = repo / "argocd" / "application.yaml"
-    argocd_path.write_text(_argocd_application(state.app_name, state.namespace), encoding="utf-8")
+    (repo / "deploy" / "argocd").mkdir(parents=True, exist_ok=True)
+    repo_url = _git_remote_https_url(repo)
+    revision = _git_branch(repo)
+    argocd_path = repo / "deploy" / "argocd" / "application.yaml"
+    argocd_path.write_text(_argocd_application(state.app_name, state.namespace, repo_url, revision), encoding="utf-8")
     return argocd_path
 
 
 def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[Path]:
     repo = Path(state.repo_ref)
     app_name = state.app_name
+    port = _resolve_port(plan)
+    health_path = _detect_health_path(repo)
+    app_version = _git_short_sha(repo)
+    repo_url = _git_remote_https_url(repo)
+    revision = _git_branch(repo)
 
     workflow_dir = repo / ".github" / "workflows"
     workflow_scripts_dir = repo / ".github" / "scripts"
-    helm_templates = repo / "helm" / "templates"
-    argocd_dir = repo / "argocd"
+    helm_templates = repo / "deploy" / "helm" / "templates"
+    argocd_dir = repo / "deploy" / "argocd"
 
     workflow_dir.mkdir(parents=True, exist_ok=True)
     workflow_scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -275,8 +367,9 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
                     "RUN useradd -m appuser",
                     "COPY . /app",
                     "RUN pip install --no-cache-dir pytest==8.2.2",
+                    f"EXPOSE {port}",
                     "USER appuser",
-                    "CMD [\"python\", \"-m\", \"http.server\", \"8000\"]",
+                    f"CMD [\"python\", \"-m\", \"http.server\", \"{port}\"]",
                     "",
                 ]
             ),
@@ -296,12 +389,12 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     self_heal_path.write_text(_workflow_self_heal(), encoding="utf-8")
     files.append(self_heal_path)
 
-    chart_path = repo / "helm" / "Chart.yaml"
-    chart_path.write_text(_helm_chart_yaml(app_name), encoding="utf-8")
+    chart_path = repo / "deploy" / "helm" / "Chart.yaml"
+    chart_path.write_text(_helm_chart_yaml(app_name, app_version), encoding="utf-8")
     files.append(chart_path)
 
-    values_path = repo / "helm" / "values.yaml"
-    values_path.write_text(_helm_values(state.image_ref_for_registry(), state.namespace), encoding="utf-8")
+    values_path = repo / "deploy" / "helm" / "values.yaml"
+    values_path.write_text(_helm_values(state.image_ref_for_registry(), port, health_path), encoding="utf-8")
     files.append(values_path)
 
     deployment_path = helm_templates / "deployment.yaml"
@@ -309,7 +402,7 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     files.append(deployment_path)
 
     argocd_path = argocd_dir / "application.yaml"
-    argocd_path.write_text(_argocd_application(app_name, state.namespace), encoding="utf-8")
+    argocd_path.write_text(_argocd_application(app_name, state.namespace, repo_url, revision), encoding="utf-8")
     files.append(argocd_path)
 
     return files

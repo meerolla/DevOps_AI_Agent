@@ -10,6 +10,42 @@ from typing import Any
 from orchestrator.state import BuildPlan, FixProposal
 
 
+_PLAYBOOK_DIR = Path(__file__).parent / "playbooks"
+
+
+def _read_playbook(name: str) -> str:
+    path = _PLAYBOOK_DIR / name
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _docker_playbook_for_framework(framework: str) -> str:
+    mapping = {
+        "fastapi": "python-fastapi.md",
+        "flask": "python-flask.md",
+        "express": "node-express.md",
+        "springboot": "java-springboot.md",
+    }
+    selected = mapping.get(framework.lower(), "python-fastapi.md")
+    return _read_playbook(selected)
+
+
+def _artifact_playbook_bundle() -> str:
+    names = [
+        "helm-deployment.md",
+        "helm-service.md",
+        "argocd-application.md",
+        "ci-workflow.md",
+    ]
+    blocks = []
+    for name in names:
+        content = _read_playbook(name)
+        if content:
+            blocks.append(f"# {name}\n{content}")
+    return "\n\n".join(blocks)
+
+
 def _extract_first_port(text: str) -> int | None:
     for pattern in (r"--port\s+(\d+)", r"port\s*=\s*(\d+)", r"listen\((\d+)\)"):
         match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -372,12 +408,15 @@ class ProviderLLM(MockLLM):
         evidence: dict[str, Any],
         build_error: str | None = None,
     ) -> str:
+        framework_playbook = _docker_playbook_for_framework(plan.framework)
         prompt = (
             "Create a secure Dockerfile for this app plan. Requirements: pinned base image, non-root user, "
             "no secret material, and include only necessary build steps.\n"
             "Read evidence and pick framework-specific runtime commands.\n"
+            "Use the provided framework playbook as authoritative guidance.\n"
             f"Plan: {plan.model_dump_json()}\n"
             f"Evidence: {json.dumps(evidence, indent=2)[:14000]}\n"
+            f"Framework playbook:\n{framework_playbook[:12000]}\n"
         )
         if build_error:
             prompt += f"Previous build error:\n{build_error[:6000]}\nRegenerate Dockerfile to address this."
@@ -396,12 +435,15 @@ class ProviderLLM(MockLLM):
         failure_output: str,
         context_files: dict[str, str],
     ) -> FixProposal:
+        playbooks = _artifact_playbook_bundle()
         prompt = (
             "Diagnose a pipeline failure in a CI/CD orchestrator. "
             "Never weaken tests or scans. Do not propose changes to application source code.\n"
             f"Failed step: {failed_step}\n"
             f"Failure output:\n{failure_output[:6000]}\n"
-            f"Context files:\n{json.dumps(context_files, indent=2)[:12000]}"
+            f"Context files:\n{json.dumps(context_files, indent=2)[:12000]}\n"
+            "Artifact playbooks (authoritative):\n"
+            f"{playbooks[:16000]}"
         )
         payload = self._chat_json(
             system_prompt=(
