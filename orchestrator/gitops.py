@@ -8,6 +8,38 @@ from typing import Iterable
 from orchestrator.tools._shell import is_sandbox, run_command
 
 
+_GIT_NON_INTERACTIVE_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "Never",
+}
+
+
+def _is_probable_git_auth_failure(output: str) -> bool:
+    text = output.lower()
+    markers = [
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "terminal prompts disabled",
+        "permission denied",
+        "repository not found",
+        "fatal: unable to access",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _auth_remediation_message(remote: str) -> str:
+    remote_type = "https" if remote.startswith("http") else "ssh" if remote.startswith("git@") else "unknown"
+    return (
+        "git push preflight failed in non-interactive mode. "
+        f"Remote type: {remote_type}. "
+        "Ensure credentials are configured in the same shell/session where orchestrator runs. "
+        "If using HTTPS, provide repo write access with a token-backed credential helper. "
+        "If using SSH, ensure the SSH key is loaded and authorized for the repository. "
+        "If GITHUB_TOKEN was exported in a different shell/repo context, export it again before running orchestrator."
+    )
+
+
 def auto_commit_generated_artifacts(repo_path: Path, paths: Iterable[Path], message: str) -> tuple[bool, str]:
     if is_sandbox():
         return True, "sandbox auto-commit skipped"
@@ -15,11 +47,11 @@ def auto_commit_generated_artifacts(repo_path: Path, paths: Iterable[Path], mess
     relative_paths = [str(p.relative_to(repo_path)).replace('\\', '/') for p in paths]
     add_cmd = "git add " + " ".join(relative_paths)
 
-    ok_add, out_add = run_command(add_cmd, cwd=repo_path)
+    ok_add, out_add = run_command(add_cmd, cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
     if not ok_add:
         return False, out_add
 
-    ok_commit, out_commit = run_command(f'git commit -m "{message}"', cwd=repo_path)
+    ok_commit, out_commit = run_command(f'git commit -m "{message}"', cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
     if not ok_commit:
         if "nothing to commit" in out_commit.lower():
             return True, "nothing to commit"
@@ -29,15 +61,15 @@ def auto_commit_generated_artifacts(repo_path: Path, paths: Iterable[Path], mess
 
 
 def _detect_default_branch(repo_path: Path) -> tuple[bool, str]:
-    ok, output = run_command("git symbolic-ref refs/remotes/origin/HEAD", cwd=repo_path)
+    ok, output = run_command("git symbolic-ref refs/remotes/origin/HEAD", cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
     if ok and output.strip():
         # output like: refs/remotes/origin/main
         return True, output.strip().split("/")[-1]
     # fallback to common default branch
-    ok_main, _ = run_command("git rev-parse --verify origin/main", cwd=repo_path)
+    ok_main, _ = run_command("git rev-parse --verify origin/main", cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
     if ok_main:
         return True, "main"
-    ok_master, _ = run_command("git rev-parse --verify origin/master", cwd=repo_path)
+    ok_master, _ = run_command("git rev-parse --verify origin/master", cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
     if ok_master:
         return True, "master"
     return False, "could not detect default branch"
@@ -54,29 +86,49 @@ def create_draft_pr_for_generated_artifacts(
 
     token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
     if not token:
-        return False, "GITHUB_TOKEN (or GH_TOKEN) is required to create a draft PR"
+        return (
+            False,
+            "GITHUB_TOKEN (or GH_TOKEN) is required to create a draft PR. "
+            "Export it in the same shell/session where orchestrator runs.",
+        )
 
-    ok_branch, out_branch = run_command(f"git checkout -b {branch_name}", cwd=repo_path)
+    ok_remote, remote_url = run_command("git remote get-url origin", cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
+    if not ok_remote:
+        return False, remote_url
+    remote = remote_url.strip()
+
+    ok_branch, out_branch = run_command(f"git checkout -b {branch_name}", cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
     if not ok_branch and "already exists" not in out_branch.lower():
         return False, out_branch
     if "already exists" in out_branch.lower():
-        ok_switch, out_switch = run_command(f"git checkout {branch_name}", cwd=repo_path)
+        ok_switch, out_switch = run_command(f"git checkout {branch_name}", cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
         if not ok_switch:
             return False, out_switch
 
-    ok_push, out_push = run_command(f"git push -u origin {branch_name}", cwd=repo_path)
+    ok_preflight, out_preflight = run_command(
+        f"git push --dry-run -u origin {branch_name}",
+        cwd=repo_path,
+        env=_GIT_NON_INTERACTIVE_ENV,
+    )
+    if not ok_preflight:
+        if _is_probable_git_auth_failure(out_preflight):
+            return False, f"{_auth_remediation_message(remote)}\n\nGit output:\n{out_preflight}"
+        return False, out_preflight
+
+    ok_push, out_push = run_command(
+        f"git push -u origin {branch_name}",
+        cwd=repo_path,
+        env=_GIT_NON_INTERACTIVE_ENV,
+    )
     if not ok_push:
+        if _is_probable_git_auth_failure(out_push):
+            return False, f"{_auth_remediation_message(remote)}\n\nGit output:\n{out_push}"
         return False, out_push
 
     ok_default, default_branch = _detect_default_branch(repo_path)
     if not ok_default:
         return False, default_branch
 
-    ok_remote, remote_url = run_command("git remote get-url origin", cwd=repo_path)
-    if not ok_remote:
-        return False, remote_url
-
-    remote = remote_url.strip()
     owner_repo = ""
     if remote.startswith("git@github.com:"):
         owner_repo = remote.replace("git@github.com:", "").replace(".git", "")
