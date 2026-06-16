@@ -1,43 +1,54 @@
 # Overview and Architecture
 
-Pipeline Setup Orchestrator is a thin multi-agent system that takes a fresh application repository, sets up CI/CD, deploys to Kubernetes, and keeps the process safe with human approval gates.
+Pipeline Setup Orchestrator is a thin multi-agent system that takes an application repository, sets up CI/CD, deploys to Kubernetes, and enforces safety with human approval gates.
 
 ## Product Summary
 
-DevOps AI Agent is positioned as: from app repo to live deployment, automatically, with spec-driven pipeline setup and self-healing.
+DevOps AI Agent is positioned as: from app repo to live deployment, automatically, with spec-driven orchestration and safe recovery.
 
 The orchestrator coordinates three judgment agents over deterministic tools:
-- Planner agent
-- Dockerizer agent
-- Diagnose-Fix agent
+- Planner
+- Dockerizer
+- Diagnose-Fix
 
 Deterministic execution runs through Docker, Trivy, Helm, ArgoCD, and cluster tooling. Humans approve destructive steps.
-
-## How It Is Delivered
-
-The system is delivered through three surfaces:
-1. CLI tool (`pipeline-setup run ...`) installed via pip or pipx on a machine with cluster access.
-2. GitHub Action (`.github/workflows/ci-self-heal.yml`) committed into the target app repo.
-3. Repo configuration (`.github/copilot-instructions.md`, skills, and agents) in the orchestrator repo.
 
 ## Core Principle
 
 Agents do judgment. Tools do execution. Humans gate destructive steps.
 
-- LLM agents are used only where there is ambiguity.
+- LLM agents reason where ambiguity exists.
 - Deterministic tools run provision, build, test, scan, deploy, and healthcheck.
 - Destructive or expensive actions pause for human approval.
+
+## Agent Reality Contract
+
+This project does not treat agents as static templates. Agent outputs must be app-specific and evidence-based.
+
+1. Planner contract
+- Must inspect repo files using read/list capabilities.
+- Must identify language/framework/entrypoint/ports/tests from evidence.
+- Must mark unknowns explicitly rather than guessing.
+
+2. Dockerizer contract
+- Must generate framework-specific Dockerfiles from the current BuildPlan and repo evidence.
+- Must not default to generic runtime commands that ignore app type.
+- Must validate through deterministic build attempts with bounded retries.
+
+3. Diagnose-Fix contract
+- Must investigate failed-step output and relevant artifacts before proposing a fix.
+- Must preserve guardrails: never weaken tests/scans, never rewrite app source code.
 
 ## Components
 
 ### Orchestrator (thin supervisor)
 
-The orchestrator decomposes goals, sequences steps, routes work, carries shared state, and enforces approval gates. It plans and routes; it does not perform deterministic work itself.
+The orchestrator decomposes goals, sequences steps, routes work, carries shared state, and enforces approval gates. It does not perform deterministic work itself.
 
 ### Judgment agents
 
 1. Planner: inspects repo and produces BuildPlan (language, framework, ports, dependencies, stateful, DB need, test command).
-2. Dockerizer: generates a working multi-stage Dockerfile.
+2. Dockerizer: generates a working Dockerfile specific to the app and validates buildability.
 3. Diagnose-Fix: investigates failed deterministic steps and proposes safe remediation or escalation.
 
 ### Deterministic tools
@@ -57,44 +68,17 @@ A typed PipelineState carries plan, Dockerfile reference, image reference, scan 
 
 ```text
 [orchestrator] receive goal + repo
-   -> [agent: Planner]      inspect repo            -> BuildPlan
-   -> [agent: Dockerizer]   write Dockerfile        -> Dockerfile
-   -> [tool: build_image]   docker build            -> image ref     (fail -> Diagnose-Fix -> retry)
-   -> [tool: run_tests]     run test command        -> results       (fail -> Diagnose-Fix -> retry)
-   -> [tool: scan_image]    Trivy scan              -> report        (high CVE -> Diagnose-Fix / GATE)
+   -> [agent: Planner]      inspect repo via tools        -> BuildPlan
+   -> [agent: Dockerizer]   generate app-specific image   -> Dockerfile
+   -> [tool: build_image]   docker build                  -> image ref     (fail -> Diagnose-Fix -> retry)
+   -> [tool: run_tests]     run test command              -> results       (fail -> Diagnose-Fix -> retry)
+   -> [tool: scan_image]    Trivy scan                    -> report        (high CVE -> Diagnose-Fix / GATE)
    -> [GATE] human approves infra change set
-   -> [tool: provision_infra] apply change set      -> infra
+   -> [tool: provision_infra] apply change set            -> infra
    -> [GATE] human approves deploy
-   -> [tool: deploy]        Helm + ArgoCD sync      -> live
-   -> [tool: healthcheck]   probe service           (unhealthy -> Diagnose-Fix -> recommend rollback)
+   -> [tool: deploy]        Helm + ArgoCD sync            -> live
+   -> [tool: healthcheck]   probe service                 (unhealthy -> Diagnose-Fix -> recommend rollback)
 ```
-
-## Diagram
-
-```text
-                         +---------------------------+
-                         |       ORCHESTRATOR        |   plans, routes, holds state,
-                         |   (thin supervisor)       |   enforces approval gates
-                         +-------------+-------------+
-            judgment           |       |       |            execution
-        +------------------+---+   +---+---+   +--+------------------------+
-        |                  |       |       |      |                        |
-   [Planner]        [Dockerizer]  [Diagnose-Fix]  |   deterministic tools  |
-    inspect repo     write image    fix failures  |  provision/build/test/ |
-                                                   |  scan/deploy/health    |
-                                                   +-----------+------------+
-                                                               |
-                                                  [GATE] human approves
-                                                  destructive steps
-```
-
-## Failure Handling
-
-- Validate after every step.
-- On failure, route to Diagnose-Fix, retry only the failed step.
-- Use bounded retries.
-- Escalate with diagnosis when retries are exhausted.
-- Keep steps idempotent and checkpointed.
 
 ## Safety and Blast Radius
 
@@ -104,13 +88,9 @@ A typed PipelineState carries plan, Dockerfile reference, image reference, scan 
 - Deploy path is GitOps-oriented through ArgoCD.
 - Audit log records steps and approvals.
 
-## Demo and Sandbox Mode
-
-For demos, use local k3s or k3d and SANDBOX mode to keep runs reproducible and low-risk.
-
 ## Scope and Evolution
 
-Current implementation works end-to-end for a Python web app on k3s. Architecture is intended to extend to more languages and deployment targets.
+Immediate architecture priority is Real LLM Agent Core: tool-using Planner, Dockerizer, and Diagnose-Fix with app-diverse behavior and anti-template regression tests.
 
 See:
 - setup and run procedures: docs/02-setup-and-operations.md

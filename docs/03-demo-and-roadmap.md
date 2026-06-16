@@ -2,22 +2,22 @@
 
 ## Demo 3 Plan: Pipeline Setup Orchestrator
 
-Show a multi-agent system that sets up CI/CD and deploys an app, with a thin orchestrator, judgment agents, deterministic tools, and human approval gates.
+Show a multi-agent system that adapts to real app repos, sets up CI/CD, deploys to Kubernetes, and stays safe with approval gates.
 
 ## Headline
 
-The core story is judgment versus execution:
-- agents where ambiguity exists
-- deterministic tools for execution
-- humans for destructive approvals
+The core story is adaptive judgment versus deterministic execution:
+- agents read and reason over repo evidence
+- deterministic tools execute build/test/scan/deploy
+- humans own destructive approvals
 
-Not "more agents." The demo point is restraint and safety, not agent count inflation.
+Not "more agents." The demo point is trusted adaptation with safety.
 
 ## What the Audience Sees
 
 1. Provide fresh app repo and goal.
-2. Planner agent inspects repo and outputs structured plan.
-3. Dockerizer agent writes Dockerfile; build tool builds image.
+2. Planner agent inspects repo files and outputs app-specific structured plan.
+3. Dockerizer agent writes framework-specific Dockerfile; build tool builds image.
 4. Tests and scan run. Introduce failure. Diagnose-Fix proposes remediation and retries step.
 5. Infra approval gate pause and approval; in sandbox this can show plan/apply behavior.
 6. Deploy approval gate pause and approval, then Helm and ArgoCD deploy and healthcheck.
@@ -47,8 +47,14 @@ Not "more agents." The demo point is restraint and safety, not agent count infla
 
 - Deliberately small number of judgment agents.
 - Deterministic tools do heavy lifting.
-- Agent value is adaptation, routing, and recovery.
+- Agent value is adaptation, routing, and recovery on real repo differences.
 - Eight autonomous agents re-deriving deterministic work would be slower, costlier, and more fragile.
+
+### Non-template acceptance criteria
+
+- Planner must produce different plans for different app fixtures (for example FastAPI versus Node/Express).
+- Dockerizer must produce different Dockerfiles for different frameworks.
+- FastAPI Dockerfiles must not use generic `python -m http.server` runtime.
 
 ## Relation to Demo 1 and Demo 2
 
@@ -81,8 +87,9 @@ python -m orchestrator.main run ... --no-draft-pr
 
 ## Roadmap
 
-1. POC now: single Python app to k3s plus GHCR with human gates.
-2. Config and targets: pipeline-setup.yaml, EKS or GKE or AKS, Terraform-provisioned cloud infra.
-3. Multi-component: multi-service apps with database dependencies.
-4. Multi-language: Java, Node, Go with language-specific Dockerizer playbooks.
-5. Full lifecycle: always-on CI self-heal, runtime triage, observability, and rollback strategy.
+1. Real LLM Agent Core: convert Planner, Dockerizer, and Diagnose-Fix to tool-using, repo-specific agent behavior with diversity tests.
+2. Runtime correctness guardrails: FastAPI/web runtime command checks, probe defaults, and anti-directory-listing checks.
+3. Config and targets: pipeline-setup.yaml plus EKS/GKE/AKS target paths.
+4. Multi-component: multi-service apps with database dependencies.
+5. Multi-language depth: Java, Node, Go with stronger framework playbooks.
+6. Full lifecycle: always-on CI self-heal, runtime triage, observability, and rollback strategy.

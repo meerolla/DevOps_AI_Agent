@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from orchestrator.agents.repo_tools import read_repo_file
 from orchestrator.llm import get_llm
 from orchestrator.state import FixProposal, PipelineState, StepName
 
@@ -63,12 +64,33 @@ def _infra_error_in(output: str) -> str | None:
     return None
 
 
+def _collect_diagnosis_context(repo_path: Path, failed_step: StepName) -> dict[str, str]:
+    context_candidates: dict[StepName, list[str]] = {
+        "build": ["Dockerfile", "requirements.txt", "package.json"],
+        "test": ["pytest.ini", "package.json", "requirements.txt"],
+        "scan": ["Dockerfile", "requirements.txt", "package.json"],
+        "provision": ["helm/values.yaml", "argocd/application.yaml"],
+        "deploy": ["helm/values.yaml", "helm/templates/deployment.yaml", "argocd/application.yaml"],
+        "healthcheck": ["helm/values.yaml", "helm/templates/deployment.yaml", "argocd/application.yaml"],
+    }
+    context: dict[str, str] = {}
+    for relative_path in context_candidates.get(failed_step, []):
+        try:
+            context[relative_path] = read_repo_file(repo_path, relative_path)
+        except FileNotFoundError:
+            continue
+    return context
+
+
 def apply_fix_for_failure(
     repo_path: Path,
     failed_step: StepName,
     failure_output: str,
     state: PipelineState,
 ) -> FixProposal:
+    llm = get_llm()
+    context_files = _collect_diagnosis_context(repo_path, failed_step)
+
     # ── test failures ────────────────────────────────────────────────────────
     # App-code bugs are the developer's job. Never auto-fix, always escalate.
     if failed_step == "test":
@@ -127,8 +149,17 @@ def apply_fix_for_failure(
                 ),
             )
         if state.build_plan is not None:
-            llm = get_llm()
-            dockerfile_content = llm.dockerize(state.build_plan)
+            if hasattr(llm, "dockerize_from_evidence"):
+                dockerfile_content = llm.dockerize_from_evidence(
+                    state.build_plan,
+                    {
+                        "dependency_files": [path for path in ["requirements.txt", "package.json"] if (repo_path / path).exists()],
+                        "dependencies": context_files,
+                    },
+                    build_error=failure_output,
+                )
+            else:
+                dockerfile_content = llm.dockerize(state.build_plan)
             dockerfile_path = repo_path / "Dockerfile"
             _assert_owned_artifact(dockerfile_path, repo_path)
             dockerfile_path.write_text(dockerfile_content, encoding="utf-8")
@@ -228,8 +259,10 @@ def apply_fix_for_failure(
         )
 
     # ── fallback: use LLM for any unhandled step ──────────────────────────────
-    llm = get_llm()
-    proposal = llm.diagnose(failed_step, failure_output)
+    if hasattr(llm, "diagnose_with_context"):
+        proposal = llm.diagnose_with_context(failed_step, failure_output, context_files)  # type: ignore[assignment]
+    else:
+        proposal = llm.diagnose(failed_step, failure_output)
     if proposal.escalated:
         return proposal
     if is_test_scan_weakening_change(proposal.change_summary):

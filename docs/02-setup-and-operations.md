@@ -7,6 +7,8 @@ Target: on-prem k3s/k3d cluster plus GHCR registry.
 
 Golden rule: agents do judgment, tools do execution, humans approve destructive steps.
 
+Immediate execution priority: Real LLM Agent Core. Planner, Dockerizer, and Diagnose-Fix must behave as repo-aware agents, not static templates.
+
 ## Part 1: Build the Orchestrator Tools (One Time)
 
 1. Rename dotgithub/ to .github/ if needed.
@@ -37,7 +39,7 @@ On-prem, single Ubuntu machine:
 - k3d installed and multi-node cluster created (1 server + 2 agents), or k3s single-node.
 - ArgoCD installed and reachable.
 - GHCR access with PAT scopes write:packages, read:packages, repo.
-- LLM key exported (OPENAI_API_KEY or ANTHROPIC_API_KEY) or mock mode enabled.
+- LLM provider environment exported in the same shell used to run the orchestrator.
 
 No AWS, no EKS, no ECR, no Terraform required on this path.
 
@@ -129,15 +131,24 @@ kubectl -n <app-namespace> create secret docker-registry ghcr-pull \
   --docker-password="<GITHUB_PAT>"
 ```
 
-### Step 5: LLM key
+### Step 5: LLM mode and provider setup
+
+Use these settings in the same shell/session that invokes `pipeline-setup` or `python -m orchestrator.main`.
 
 ```bash
+export LLM_MODE=provider
 export OPENAI_API_KEY="<key>"
+export OPENAI_MODEL="gpt-4o-mini"   # optional
 # or
 export ANTHROPIC_API_KEY="<key>"
 # or
 export LLM_MODE=mock
 ```
+
+Important:
+- `OPENAI_API_KEY` is the recognized variable name.
+- `OPENAI_KEY` alone is not sufficient for provider mode.
+- If env vars are set in a different terminal session, the orchestrator process will not see them.
 
 ### Step 6: Verify platform
 
@@ -160,6 +171,19 @@ Equivalent module invocation:
 ```bash
 python -m orchestrator.main run --repo ../resume-scorer --cluster default --registry ghcr.io/meerolla/resume-scorer --namespace my-app --goal "given an app repo, set up CI/CD and deploy it"
 ```
+
+### Validate provider mode is active
+
+Before a run, verify your shell has provider vars:
+
+```bash
+echo "$LLM_MODE"
+echo "$OPENAI_API_KEY" | wc -c
+```
+
+Expected:
+- `LLM_MODE` prints `provider` for real-provider runs.
+- `OPENAI_API_KEY` length check is non-zero.
 
 ### Gate approvals
 
@@ -184,13 +208,20 @@ Generated assets are committed and draft PR is opened by default.
 
 ### Operational sequence
 
-1. Plan agent produces BuildPlan.
-2. Dockerizer produces Dockerfile; build tool pushes image to GHCR.
+1. Planner inspects repo evidence and produces BuildPlan.
+2. Dockerizer generates an app-specific Dockerfile; build tool validates and pushes image to GHCR.
 3. Test and scan run; failures route to Diagnose-Fix and retry or escalate.
 4. Infra approval gate then provision.
 5. Deploy approval gate then Helm and ArgoCD deploy.
 6. Healthcheck verifies rollout.
 7. Generated pipeline artifacts are committed and draft PR is opened by default.
+
+### Quick realism checks (avoid template regressions)
+
+After a run, validate generated outputs are app-specific:
+- Dockerfile runtime command matches framework (for FastAPI use uvicorn command, not generic http.server).
+- BuildPlan fields differ across different app fixtures (for example Python/FastAPI versus Node/Express).
+- Diagnose-Fix suggestions remain inside generated artifact boundaries.
 
 ### Expected generated artifacts
 
