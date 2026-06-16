@@ -115,11 +115,68 @@ kubectl -n argocd get pods     # argocd pods Running
 helm version                   # Helm present
 ```
 
+## Step 7 — Configure post-merge activation automation
+The generated app workflow `.github/workflows/post-merge-activate.yml` runs after merge to `main`.
+It expects a **self-hosted GitHub Actions runner** with cluster access and these tools installed:
+- `kubectl`
+- `helm`
+- optional `argocd` CLI (workflow falls back to ArgoCD automated sync if missing)
+
+### 7.1 Prepare runner host
+Use a Linux host that can reach your Kubernetes API server and GitHub.
+```bash
+sudo apt-get update
+sudo apt-get install -y curl tar git jq
+
+# install kubectl if missing
+command -v kubectl >/dev/null || {
+  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+  sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+}
+
+# install helm if missing
+command -v helm >/dev/null || curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
+
+### 7.2 Register self-hosted runner in GitHub
+In the target app repository:
+- `Settings` -> `Actions` -> `Runners` -> `New self-hosted runner`
+- choose `Linux` + `x64`
+- copy the generated download/config commands and run them on the runner host
+
+Typical command sequence:
+```bash
+mkdir -p ~/actions-runner && cd ~/actions-runner
+# download URL/version/token are provided by GitHub UI
+curl -o actions-runner-linux-x64.tar.gz -L <download-url-from-github>
+tar xzf actions-runner-linux-x64.tar.gz
+./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels self-hosted,linux,k8s
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+### 7.3 Configure Kubernetes access for runner user
+The runner service user must have a kubeconfig with the context you pass to orchestrator `run --cluster ...`.
+```bash
+mkdir -p ~/.kube
+# copy or create kubeconfig for the runner user
+kubectl config get-contexts
+kubectl get nodes
+helm version
+```
+
+### 7.4 Verify runner is online
+- In GitHub repo `Settings` -> `Actions` -> `Runners`, status should be `Idle`.
+- Trigger a simple workflow dispatch to confirm the job lands on the self-hosted runner.
+
+This enables fully automated Phase B activation with no manual deploy CLI wait.
+
 ## You're done — what exists now
 - A Kubernetes cluster (context `default` for k3s, or `k3d-mycluster` for k3d).
 - ArgoCD installed and reachable.
 - GHCR login + a pull secret in your app namespace.
 - An LLM key (or mock mode).
+- Self-hosted Actions runner ready for post-merge activation workflow.
 
 Next, follow **RUNBOOK.md Part 3**, passing the matching `--cluster` context.
 

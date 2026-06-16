@@ -1,25 +1,25 @@
 # Overview and Architecture
 
-Pipeline Setup Orchestrator is a thin multi-agent system that takes an application repository, sets up CI/CD, deploys to Kubernetes, and enforces safety with human approval gates.
+Pipeline Setup Orchestrator is a thin multi-agent system that takes an application repository, generates CI/CD plus GitOps assets, and activates deployment through a post-merge automation path.
 
 ## Product Summary
 
-DevOps AI Agent is positioned as: from app repo to live deployment, automatically, with spec-driven orchestration and safe recovery.
+DevOps AI Agent is positioned as: from app repo to live deployment, with spec-driven orchestration, deterministic execution, and safety controls.
 
 The orchestrator coordinates three judgment agents over deterministic tools:
 - Planner
 - Dockerizer
 - Diagnose-Fix
 
-Deterministic execution runs through Docker, Trivy, Helm, ArgoCD, and cluster tooling. Humans approve destructive steps.
+Deterministic execution runs through Docker, test runner, scan tooling, Helm, ArgoCD, and cluster tooling.
 
 ## Core Principle
 
-Agents do judgment. Tools do execution. Humans gate destructive steps.
+Agents do judgment. Tools do execution. Humans govern risk boundaries.
 
 - LLM agents reason where ambiguity exists.
 - Deterministic tools run provision, build, test, scan, deploy, and healthcheck.
-- Destructive or expensive actions pause for human approval.
+- Destructive operations are controlled by orchestration policy. Current post-merge activation uses non-interactive deploy approval for automated rollout, with an optional future GitHub Environment gate.
 
 ## Agent Reality Contract
 
@@ -43,7 +43,7 @@ This project does not treat agents as static templates. Agent outputs must be ap
 
 ### Orchestrator (thin supervisor)
 
-The orchestrator decomposes goals, sequences steps, routes work, carries shared state, and enforces approval gates. It does not perform deterministic work itself.
+The orchestrator decomposes goals, sequences steps, routes work, carries shared state, and enforces policy. It does not perform deterministic work itself.
 
 ### Judgment agents
 
@@ -64,34 +64,64 @@ The orchestrator decomposes goals, sequences steps, routes work, carries shared 
 
 A typed PipelineState carries plan, Dockerfile reference, image reference, scan report, manifests, approvals, and step status.
 
+## Architecture Diagram
+
+```mermaid
+flowchart TD
+  A[Run Bootstrap] --> B[Planner Agent]
+  B --> C[Dockerizer Agent]
+  C --> D[Build Tool]
+  D --> E[Test Tool]
+  E --> F[Scan Tool]
+  F --> G[Infra Approval Gate]
+  G --> H[Provision Tool]
+  H --> I[Finalize: validate + commit + draft PR]
+  I --> J[Merge to main]
+  J --> K[GitHub Workflow: post-merge-activate]
+  K --> L[Activate Command]
+  L --> M[Deploy Tool: Helm + ArgoCD]
+  M --> N[Healthcheck Tool]
+  E -. fail .-> X[Diagnose-Fix Agent]
+  F -. fail .-> X
+  N -. fail .-> X
+  X -. retry/escalate .-> E
+```
+
 ## End-to-End Flow
 
+### Phase A: Bootstrap (pre-merge)
+
 ```text
-[orchestrator] receive goal + repo
-   -> [agent: Planner]      inspect repo via tools        -> BuildPlan
-   -> [agent: Dockerizer]   generate app-specific image   -> Dockerfile
-   -> [tool: build_image]   docker build                  -> image ref     (fail -> Diagnose-Fix -> retry)
-   -> [tool: run_tests]     run test command              -> results       (fail -> Diagnose-Fix -> retry)
-   -> [tool: scan_image]    Trivy scan                    -> report        (high CVE -> Diagnose-Fix / GATE)
-   -> [GATE] human approves infra change set
-   -> [tool: provision_infra] apply change set            -> infra
-   -> [GATE] human approves deploy
-   -> [tool: deploy]        Helm + ArgoCD sync            -> live
-   -> [tool: healthcheck]   probe service                 (unhealthy -> Diagnose-Fix -> recommend rollback)
+[orchestrator run bootstrap]
+   -> Planner (agent)
+   -> Dockerizer (agent) + build (tool)
+   -> test (tool), scan (tool) with Diagnose-Fix retry loop
+   -> infra approval + provision
+   -> finalize: validate artifacts, commit, draft PR
 ```
+
+### Phase B: Activation (post-merge automation)
+
+```text
+[GitHub workflow on main]
+   -> orchestrator activate (non-interactive)
+   -> deploy (Helm + ArgoCD)
+   -> healthcheck
+```
+
+This split ensures ArgoCD only syncs after deploy assets exist on the tracked revision.
 
 ## Safety and Blast Radius
 
 - No standing cloud-admin credentials for agents.
-- Destructive operations run only via gated tool calls.
-- Humans review change set before apply.
-- Deploy path is GitOps-oriented through ArgoCD.
-- Audit log records steps and approvals.
+- Destructive operations run only via deterministic tools and policy checks.
+- Deploy tool validates GitOps source revision/path before ArgoCD sync.
+- Audit log records key decisions, retries, and escalations.
 
 ## Scope and Evolution
 
-Immediate architecture priority is Real LLM Agent Core: tool-using Planner, Dockerizer, and Diagnose-Fix with app-diverse behavior and anti-template regression tests.
+Immediate architecture priority remains Real LLM Agent Core: tool-using Planner, Dockerizer, and Diagnose-Fix with app-diverse behavior and anti-template regression tests.
 
 See:
-- setup and run procedures: docs/02-setup-and-operations.md
-- demo script and roadmap: docs/03-demo-and-roadmap.md
+- setup and operations: docs/02-setup-and-operations.md
+- demo plan and roadmap: docs/03-demo-and-roadmap.md

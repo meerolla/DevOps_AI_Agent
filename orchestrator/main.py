@@ -79,7 +79,7 @@ def run_command(
         auto_commit=auto_commit,
         auto_draft_pr=auto_draft_pr,
     )
-    final_state = run_pipeline(state, auto_approve=auto_approve)
+    final_state = run_pipeline(state, auto_approve=auto_approve, phase="bootstrap")
 
     audit_path = Path(repo) / ".orchestrator_audit.log"
     write_audit_log(final_state, audit_path)
@@ -91,7 +91,16 @@ def run_command(
         print(f"Audit log: {audit_path}")
         return 2
 
-    all_ok = all(status == "ok" for status in final_state.step_status.values())
+    bootstrap_required_steps = [
+        "plan",
+        "dockerize",
+        "build",
+        "test",
+        "scan",
+        "approve_infra",
+        "provision",
+    ]
+    all_ok = all(final_state.step_status[step] == "ok" for step in bootstrap_required_steps)
     if all_ok:
         print("Pipeline completed successfully.")
         if final_state.commit_sha:
@@ -103,6 +112,48 @@ def run_command(
 
     print("Pipeline did not fully complete.")
     print(f"Escalation: {final_state.escalate_reason or 'approval not granted or step failure'}")
+    print(_render_failure_summary(final_state))
+    print(f"Audit log: {audit_path}")
+    return 1
+
+
+def activate_command(
+    repo: str,
+    cluster: str,
+    registry: str,
+    namespace: str,
+    auto_approve_deploy: bool,
+) -> int:
+    state = PipelineState(
+        goal="post-merge gitops activation",
+        repo_ref=repo,
+        cluster=cluster,
+        registry=registry,
+        namespace=namespace,
+        app_name=Path(registry.split(":")[0]).name,
+        auto_commit=False,
+        auto_draft_pr=False,
+    )
+    if auto_approve_deploy:
+        state.approvals.deploy = True
+
+    final_state = run_pipeline(state, auto_approve=auto_approve_deploy, phase="activate")
+    audit_path = Path(repo) / ".orchestrator_audit.log"
+    write_audit_log(final_state, audit_path)
+    _save_state(final_state)
+
+    if final_state.paused_for:
+        print(_render_pause_instruction(final_state))
+        return 2
+
+    all_ok = all(final_state.step_status[step] == "ok" for step in ["approve_deploy", "deploy", "healthcheck"])
+    if all_ok:
+        print("Post-merge activation completed successfully.")
+        print(f"Audit log: {audit_path}")
+        return 0
+
+    print("Post-merge activation did not fully complete.")
+    print(f"Escalation: {final_state.escalate_reason or 'deploy or healthcheck failed'}")
     print(_render_failure_summary(final_state))
     print(f"Audit log: {audit_path}")
     return 1
@@ -121,6 +172,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--auto-approve", action="store_true", help="Auto approve both gates")
     run_parser.add_argument("--no-auto-commit", action="store_true", help="Disable auto-commit of generated artifacts")
     run_parser.add_argument("--no-draft-pr", action="store_true", help="Disable automatic draft PR creation")
+
+    activate_parser = sub.add_parser("activate", help="Run post-merge deploy activation workflow")
+    activate_parser.add_argument("--repo", required=True, help="Repository path")
+    activate_parser.add_argument("--cluster", required=True, help="Kubernetes context name")
+    activate_parser.add_argument("--registry", required=True, help="Container registry reference, e.g. ghcr.io/org/app")
+    activate_parser.add_argument("--namespace", required=True, help="Target Kubernetes namespace")
+    activate_parser.add_argument(
+        "--auto-approve-deploy",
+        action="store_true",
+        help="Automatically approve deploy gate for non-interactive workflow runs",
+    )
 
     approve_parser = sub.add_parser("approve", help="Approve a paused gate")
     approve_parser.add_argument("--repo", required=True, help="Repository path")
@@ -169,9 +231,18 @@ def main() -> int:
         print(f"Approved: {args.step}")
         return 0
 
+    if args.command == "activate":
+        return activate_command(
+            repo=args.repo,
+            cluster=args.cluster,
+            registry=args.registry,
+            namespace=args.namespace,
+            auto_approve_deploy=args.auto_approve_deploy,
+        )
+
     if args.command == "resume":
         state = _load_state(args.repo)
-        final_state = run_pipeline(state, auto_approve=args.auto_approve)
+        final_state = run_pipeline(state, auto_approve=args.auto_approve, phase="bootstrap")
 
         audit_path = Path(args.repo) / ".orchestrator_audit.log"
         write_audit_log(final_state, audit_path)
@@ -181,7 +252,16 @@ def main() -> int:
             print(_render_pause_instruction(final_state))
             return 2
 
-        all_ok = all(status == "ok" for status in final_state.step_status.values())
+        bootstrap_required_steps = [
+            "plan",
+            "dockerize",
+            "build",
+            "test",
+            "scan",
+            "approve_infra",
+            "provision",
+        ]
+        all_ok = all(final_state.step_status[step] == "ok" for step in bootstrap_required_steps)
         if all_ok:
             print("Pipeline completed successfully.")
             return 0

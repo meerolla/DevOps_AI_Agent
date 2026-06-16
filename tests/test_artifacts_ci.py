@@ -37,6 +37,26 @@ def test_generated_ci_workflow_has_pr_and_main_tracks(tmp_path: Path) -> None:
     assert "[skip ci]" in ci_text
 
 
+def test_generated_post_merge_activation_workflow(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+
+    generate_pipeline_artifacts(state, plan)
+
+    workflow_path = tmp_path / ".github" / "workflows" / "post-merge-activate.yml"
+    workflow_text = workflow_path.read_text(encoding="utf-8")
+    assert "name: post-merge-activate" in workflow_text
+    assert "push:" in workflow_text
+    assert "branches: [main]" in workflow_text
+    assert "runs-on: [self-hosted]" in workflow_text
+    assert "python -m orchestrator.main activate" in workflow_text
+    assert "--cluster \"default\"" in workflow_text
+    assert "--namespace \"my-app\"" in workflow_text
+    assert "--auto-approve-deploy" in workflow_text
+    assert "vars.KUBE_CONTEXT" not in workflow_text
+    assert "vars.APP_NAMESPACE" not in workflow_text
+
+
 def test_generated_helm_values_helper_updates_tag(tmp_path: Path) -> None:
     state = _make_state(tmp_path)
     plan = BuildPlan(language="python", test_command="pytest -q")
@@ -77,6 +97,7 @@ def test_generated_yaml_is_valid_for_non_template_files(tmp_path: Path) -> None:
         tmp_path / "deploy" / "argocd" / "application.yaml",
         tmp_path / ".github" / "workflows" / "ci.yml",
         tmp_path / ".github" / "workflows" / "ci-self-heal.yml",
+        tmp_path / ".github" / "workflows" / "post-merge-activate.yml",
     ]:
         yaml.safe_load(file_path.read_text(encoding="utf-8"))
 

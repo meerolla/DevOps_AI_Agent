@@ -24,6 +24,7 @@ from orchestrator.validators import validate_generated_artifacts
 class OrchestratorGraphState(TypedDict):
     pipeline_state: PipelineState
     auto_approve: bool
+    phase: Literal["full", "bootstrap", "activate"]
 
 
 def _node_plan(state: OrchestratorGraphState) -> OrchestratorGraphState:
@@ -283,6 +284,8 @@ def _route_after_provision(state: OrchestratorGraphState) -> str:
     pipeline_state = state["pipeline_state"]
     if pipeline_state.step_status["provision"] != "ok":
         return END
+    if state["phase"] == "bootstrap":
+        return "finalize"
     return "approve_deploy"
 
 
@@ -298,6 +301,12 @@ def _route_after_healthcheck(state: OrchestratorGraphState) -> str:
     if pipeline_state.step_status["healthcheck"] != "ok":
         return END
     return "finalize"
+
+
+def _route_start(state: OrchestratorGraphState) -> str:
+    if state["phase"] == "activate":
+        return "approve_deploy"
+    return "plan"
 
 
 def approve_infra_gate(state: PipelineState, auto_approve: bool) -> bool:
@@ -366,15 +375,30 @@ def _step_with_retries(
             return False
 
 
-def run_pipeline(state: PipelineState, auto_approve: bool | None = None) -> PipelineState:
+def run_pipeline(
+    state: PipelineState,
+    auto_approve: bool | None = None,
+    phase: Literal["full", "bootstrap", "activate"] = "full",
+) -> PipelineState:
     auto_approve = auto_approve if auto_approve is not None else os.getenv("AUTO_APPROVE", "0") == "1"
-    if state.paused_for == "approve_infra" and not state.approvals.infra:
+    if phase != "activate" and state.paused_for == "approve_infra" and not state.approvals.infra:
         return state
     if state.paused_for == "approve_deploy" and not state.approvals.deploy:
         return state
 
+    if phase == "activate":
+        state.paused_for = None
+        state.pending_approval_summary = None
+        state.step_status["approve_deploy"] = "pending"
+        state.step_status["deploy"] = "pending"
+        state.step_status["healthcheck"] = "pending"
+
     compiled_graph = build_graph()
-    graph_state: OrchestratorGraphState = {"pipeline_state": state, "auto_approve": auto_approve}
+    graph_state: OrchestratorGraphState = {
+        "pipeline_state": state,
+        "auto_approve": auto_approve,
+        "phase": phase,
+    }
     result = compiled_graph.invoke(graph_state)
     return result["pipeline_state"]
 
@@ -394,14 +418,14 @@ def build_graph():
     graph.add_node("healthcheck", _node_healthcheck)
     graph.add_node("finalize", _node_finalize)
 
-    graph.add_edge(START, "plan")
+    graph.add_conditional_edges(START, _route_start, ["plan", "approve_deploy"])
     graph.add_conditional_edges("plan", lambda s: _route_after_step(s, "plan", "dockerize"), ["dockerize", END])
     graph.add_conditional_edges("dockerize", lambda s: _route_after_step(s, "dockerize", "build"), ["build", END])
     graph.add_conditional_edges("build", lambda s: _route_after_step(s, "build", "test"), ["test", END])
     graph.add_conditional_edges("test", lambda s: _route_after_step(s, "test", "scan"), ["scan", END])
     graph.add_conditional_edges("scan", lambda s: _route_after_step(s, "scan", "approve_infra"), ["approve_infra", END])
     graph.add_conditional_edges("approve_infra", _route_after_approve_infra, ["provision", END])
-    graph.add_conditional_edges("provision", _route_after_provision, ["approve_deploy", END])
+    graph.add_conditional_edges("provision", _route_after_provision, ["approve_deploy", "finalize", END])
     graph.add_conditional_edges("approve_deploy", _route_after_approve_deploy, ["deploy", END])
     graph.add_conditional_edges("deploy", _route_after_deploy, ["healthcheck", END])
     graph.add_conditional_edges("healthcheck", _route_after_healthcheck, ["finalize", END])
