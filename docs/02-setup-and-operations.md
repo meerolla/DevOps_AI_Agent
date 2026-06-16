@@ -5,7 +5,7 @@ This document consolidates one-time platform setup and per-app runtime operation
 Scope: current phase. Stage 1 (build the app) is separate; Stage 4 (runtime triage) is next phase.
 Target: on-prem k3s/k3d cluster plus GHCR registry.
 
-Golden rule: agents do judgment, tools do execution, humans approve destructive steps.
+Golden rule: agents do judgment, tools do execution, and orchestration enforces safety policy.
 
 Immediate execution priority: Real LLM Agent Core. Planner, Dockerizer, and Diagnose-Fix must behave as repo-aware agents, not static templates.
 
@@ -40,6 +40,7 @@ On-prem, single Ubuntu machine:
 - ArgoCD installed and reachable.
 - GHCR access with PAT scopes write:packages, read:packages, repo.
 - LLM provider environment exported in the same shell used to run the orchestrator.
+- Self-hosted GitHub Actions runner with access to Kubernetes API.
 
 No AWS, no EKS, no ECR, no Terraform required on this path.
 
@@ -158,6 +159,52 @@ kubectl -n argocd get pods
 helm version
 ```
 
+### Step 7: Configure self-hosted runner for post-merge activation
+
+The generated workflow `.github/workflows/post-merge-activate.yml` runs on `self-hosted` runner labels.
+
+#### 7.1 Prepare runner host
+
+```bash
+sudo apt-get update
+sudo apt-get install -y curl tar git jq
+
+command -v kubectl >/dev/null || {
+  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+  sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+}
+
+command -v helm >/dev/null || curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
+
+Optional but recommended:
+- install `argocd` CLI for explicit sync visibility
+
+#### 7.2 Register runner in target app repository
+
+In GitHub: `Settings` -> `Actions` -> `Runners` -> `New self-hosted runner`.
+
+Run provided commands on runner host, for example:
+
+```bash
+mkdir -p ~/actions-runner && cd ~/actions-runner
+curl -o actions-runner-linux-x64.tar.gz -L <download-url-from-github>
+tar xzf actions-runner-linux-x64.tar.gz
+./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels self-hosted,linux,k8s
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+#### 7.3 Configure Kubernetes access for runner user
+
+```bash
+kubectl config get-contexts
+kubectl get nodes
+helm version
+```
+
+The runner must have the same kube context referenced in orchestrator run command `--cluster` argument.
+
 ## Part 4: Run on an App (Per App)
 
 ### Primary run command
@@ -172,6 +219,9 @@ Equivalent module invocation:
 python -m orchestrator.main run --repo ../resume-scorer --cluster default --registry ghcr.io/meerolla/resume-scorer --namespace my-app --goal "given an app repo, set up CI/CD and deploy it"
 ```
 
+Bootstrap run executes pre-merge phase only (plan/build/test/scan/provision/finalize).
+Post-merge deployment activates automatically through generated GitHub workflow.
+
 ### Validate provider mode is active
 
 Before a run, verify your shell has provider vars:
@@ -185,19 +235,25 @@ Expected:
 - `LLM_MODE` prints `provider` for real-provider runs.
 - `OPENAI_API_KEY` length check is non-zero.
 
-### Gate approvals
+### Gate approvals (bootstrap)
 
 ```bash
 pipeline-setup approve --repo ./my-app --step infra
 pipeline-setup resume --repo ./my-app
-pipeline-setup approve --repo ./my-app --step deploy
-pipeline-setup resume --repo ./my-app
 ```
+
+Deploy approval is currently automated in post-merge activation workflow.
 
 ### Retry from failed step after manual fix
 
 ```bash
 pipeline-setup retry --repo ./my-app --from-step test
+```
+
+If post-merge activation needs manual recovery, run:
+
+```bash
+python -m orchestrator.main activate --repo ./my-app --cluster <context> --registry ghcr.io/<org>/my-app --namespace <namespace> --auto-approve-deploy
 ```
 
 ### Draft PR behavior
@@ -212,9 +268,8 @@ Generated assets are committed and draft PR is opened by default.
 2. Dockerizer generates an app-specific Dockerfile; build tool validates and pushes image to GHCR.
 3. Test and scan run; failures route to Diagnose-Fix and retry or escalate.
 4. Infra approval gate then provision.
-5. Deploy approval gate then Helm and ArgoCD deploy.
-6. Healthcheck verifies rollout.
-7. Generated pipeline artifacts are committed and draft PR is opened by default.
+5. Finalize validates artifacts, commits generated assets, and opens draft PR by default.
+6. After merge to `main`, post-merge workflow runs activation (deploy + healthcheck).
 
 ### Quick realism checks (avoid template regressions)
 
@@ -228,10 +283,11 @@ After a run, validate generated outputs are app-specific:
 - Dockerfile
 - .github/workflows/ci.yml
 - .github/workflows/ci-self-heal.yml
-- helm/Chart.yaml
-- helm/values.yaml
-- helm/templates/deployment.yaml
-- argocd/application.yaml
+- .github/workflows/post-merge-activate.yml
+- deploy/helm/Chart.yaml
+- deploy/helm/values.yaml
+- deploy/helm/templates/deployment.yaml
+- deploy/argocd/application.yaml
 
 Done when the app is live and healthy in cluster and the repo contains generated pipeline assets.
 

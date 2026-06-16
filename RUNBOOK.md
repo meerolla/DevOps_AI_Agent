@@ -38,24 +38,25 @@ On-prem, on your single Ubuntu machine:
 - [ ] Run it (note: GHCR registry, k3d kube-context):
       `pipeline-setup run --repo ./my-app --cluster k3d-mycluster --registry ghcr.io/<org>/my-app --namespace my-app`
 
-When the run pauses at a gate, approve and resume:
+When the run pauses for infrastructure approval, approve and resume:
 - `pipeline-setup approve --repo ./my-app --step infra`
 - `pipeline-setup resume --repo ./my-app`
-- `pipeline-setup approve --repo ./my-app --step deploy`
-- `pipeline-setup resume --repo ./my-app`
+
+Deploy approval and activation are automated post-merge via `.github/workflows/post-merge-activate.yml`.
 
 The orchestrator then:
 1. **Plan** (agent) → BuildPlan.
 2. **Dockerize** (agent) → Dockerfile; **Build** (tool) → image pushed to **GHCR**.
 3. **Test** + **Scan** (tools). Failure → **Diagnose-Fix** (agent) proposes a fix → retry that step.
 4. **[GATE]** approve provision → creates namespace + secrets (no Terraform on-prem).
-5. **[GATE]** approve deploy → **Helm + ArgoCD** sync to the k3d cluster → **Healthcheck**.
-6. Commits generated assets and opens a **draft PR** by default (requires `GITHUB_TOKEN` with `repo`
+5. Commits generated assets and opens a **draft PR** by default (requires `GITHUB_TOKEN` with `repo`
       scope): Dockerfile, CI workflow, Helm chart, ArgoCD Application, **and the Stage-3 CI Self-Heal
       workflow** (+ the GHCR/LLM secrets references). Use `--no-draft-pr` to disable this behavior.
+6. After the PR is merged to `main`, post-merge activation workflow runs automatically on a self-hosted
+      runner and performs **Helm + ArgoCD** sync and **Healthcheck**.
 
-**Done when:** the app is live and healthy in the k3d cluster and the repo carries its pipeline + the
-CI Self-Heal workflow.
+**Done when:** the app is live and healthy in the k3d cluster after merge, and the repo carries its
+pipeline + the CI Self-Heal + post-merge activation workflows.
 
 ---
 ## After setup — Stage 3 is live (no extra install)

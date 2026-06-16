@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -42,6 +43,19 @@ def _git_branch(repo: Path) -> str:
   if branch == "HEAD":
     return "main"
   return branch
+
+
+def _gitops_target_revision(repo: Path) -> str:
+  configured = (Path(repo) / ".pipeline-setup.yaml")
+  if configured.exists():
+    text = configured.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"(?m)^\s*targetRevision\s*:\s*([\w./-]+)", text)
+    if match:
+      return match.group(1).strip()
+  env_value = os.getenv("GITOPS_TARGET_REVISION", "").strip()
+  if env_value:
+    return env_value
+  return "main"
 
 
 def _git_short_sha(repo: Path) -> str:
@@ -216,6 +230,46 @@ jobs:
 """
 
 
+def _workflow_post_merge_activate(cluster: str, namespace: str) -> str:
+    workflow = """name: post-merge-activate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/**'
+      - 'Dockerfile'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+jobs:
+  activate:
+    runs-on: [self-hosted]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Resolve image repository
+        run: |
+          repo=$(python .github/scripts/helm_values.py get-repository --file deploy/helm/values.yaml)
+          echo "IMAGE_REPOSITORY=$repo" >> "$GITHUB_ENV"
+      - name: Activate post-merge deploy
+        run: |
+          python -m orchestrator.main activate \
+            --repo . \
+            --cluster "__CLUSTER__" \
+            --registry "$IMAGE_REPOSITORY" \
+            --namespace "__NAMESPACE__" \
+            --auto-approve-deploy
+"""
+    return workflow.replace("__CLUSTER__", cluster).replace("__NAMESPACE__", namespace)
+
+
 def _helm_chart_yaml(app_name: str, app_version: str) -> str:
     return f"""apiVersion: v2
 name: {app_name}
@@ -330,7 +384,7 @@ def regenerate_argocd_application(state: PipelineState) -> Path:
     repo = Path(state.repo_ref)
     (repo / "deploy" / "argocd").mkdir(parents=True, exist_ok=True)
     repo_url = _git_remote_https_url(repo)
-    revision = _git_branch(repo)
+    revision = _gitops_target_revision(repo)
     argocd_path = repo / "deploy" / "argocd" / "application.yaml"
     argocd_path.write_text(_argocd_application(state.app_name, state.namespace, repo_url, revision), encoding="utf-8")
     return argocd_path
@@ -343,7 +397,7 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     health_path = _detect_health_path(repo)
     app_version = _git_short_sha(repo)
     repo_url = _git_remote_https_url(repo)
-    revision = _git_branch(repo)
+    revision = _gitops_target_revision(repo)
 
     workflow_dir = repo / ".github" / "workflows"
     workflow_scripts_dir = repo / ".github" / "scripts"
@@ -388,6 +442,10 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     self_heal_path = workflow_dir / "ci-self-heal.yml"
     self_heal_path.write_text(_workflow_self_heal(), encoding="utf-8")
     files.append(self_heal_path)
+
+    activate_path = workflow_dir / "post-merge-activate.yml"
+    activate_path.write_text(_workflow_post_merge_activate(state.cluster, state.namespace), encoding="utf-8")
+    files.append(activate_path)
 
     chart_path = repo / "deploy" / "helm" / "Chart.yaml"
     chart_path.write_text(_helm_chart_yaml(app_name, app_version), encoding="utf-8")
