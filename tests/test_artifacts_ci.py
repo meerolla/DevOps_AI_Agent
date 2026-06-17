@@ -51,7 +51,8 @@ def test_generated_post_merge_activation_workflow(tmp_path: Path) -> None:
     assert "runs-on: [self-hosted]" in workflow_text
     assert "helm upgrade --install" in workflow_text
     assert "kubectl --context \"default\" apply -f deploy/argocd/application.yaml" in workflow_text
-    assert "argocd app sync \"$APP_NAME\" --grpc-web" in workflow_text
+    assert "argocd app sync \"$APP_NAME\" --server \"$ARGOCD_SERVER\" --grpc-web" in workflow_text
+    assert "ARGOCD_SERVER not set; skipping manual argocd sync" in workflow_text
     assert "--kube-context \"default\"" in workflow_text
     assert "--namespace \"my-app\"" in workflow_text
     assert "vars.KUBE_CONTEXT" not in workflow_text
