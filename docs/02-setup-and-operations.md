@@ -118,6 +118,10 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.pas
 kubectl -n argocd port-forward svc/argocd-server 8081:443
 ```
 
+For private GitHub app repositories, the orchestrator `provision_infra` step can also ensure ArgoCD repository access automatically by creating an ArgoCD repository secret. Export one of these credential pairs in the same shell/session before running the orchestrator:
+- `ARGOCD_REPO_USERNAME` + `ARGOCD_REPO_TOKEN` (preferred)
+- or `GITHUB_USER` + `GITHUB_TOKEN` (fallback)
+
 ### Step 4: GHCR access
 
 Create PAT with scopes: write:packages, read:packages, repo.
