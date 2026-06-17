@@ -10,6 +10,51 @@ from typing import Any
 from orchestrator.state import BuildPlan, FixProposal
 
 
+# ---------------------------------------------------------------------------
+# Tool schemas exposed to the LLM for repo exploration (provider mode only).
+# These mirror the functions in orchestrator/agents/repo_tools.py.
+# ---------------------------------------------------------------------------
+REPO_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_repo_files",
+            "description": (
+                "List files and directories inside the target repository at a given relative path. "
+                "Directories are suffixed with '/'. Use '.' for the repo root."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "relative_path": {
+                        "type": "string",
+                        "description": "Relative path from the repo root to list. Defaults to '.' (root).",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_repo_file",
+            "description": "Read the contents of a file inside the target repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "relative_path": {
+                        "type": "string",
+                        "description": "Relative path of the file to read (from repo root).",
+                    }
+                },
+                "required": ["relative_path"],
+            },
+        },
+    },
+]
+
+
 _PLAYBOOK_DIR = Path(__file__).parent / "playbooks"
 
 
@@ -343,6 +388,82 @@ class ProviderLLM(MockLLM):
             ],
         )
         return (response.choices[0].message.content or "").strip()
+
+    def _execute_tool(self, tool_name: str, tool_args: dict[str, Any], repo_path: Path) -> str:
+        """Dispatch a tool call from the LLM to the repo_tools implementations."""
+        from orchestrator.agents.repo_tools import list_repo_files, read_repo_file
+
+        try:
+            if tool_name == "list_repo_files":
+                rel = tool_args.get("relative_path", ".")
+                result = list_repo_files(repo_path, rel)
+                return json.dumps(result)
+            if tool_name == "read_repo_file":
+                rel = tool_args.get("relative_path", "")
+                return read_repo_file(repo_path, rel)
+        except (ValueError, FileNotFoundError) as exc:
+            return f"Error: {exc}"
+        return f"Error: unknown tool {tool_name!r}"
+
+    def _chat_with_tools(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        repo_path: Path,
+        max_rounds: int = 12,
+    ) -> str:
+        """Agentic tool-calling loop.
+
+        The model may call list_repo_files / read_repo_file repeatedly until it
+        is ready to return a final JSON answer. Bounded by max_rounds to prevent
+        runaway loops.
+        """
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        for _ in range(max_rounds):
+            response = self._client.chat.completions.create(
+                model=self.model,
+                temperature=0,
+                tools=REPO_TOOLS,  # type: ignore[arg-type]
+                tool_choice="auto",
+                messages=messages,  # type: ignore[arg-type]
+            )
+            choice = response.choices[0]
+            msg = choice.message
+
+            # Build the assistant dict to append to history
+            assistant_entry: dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+            if msg.tool_calls:
+                assistant_entry["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in msg.tool_calls
+                ]
+            messages.append(assistant_entry)
+
+            if choice.finish_reason == "stop" or not msg.tool_calls:
+                return (msg.content or "").strip()
+
+            # Execute each tool call and feed results back
+            for tc in msg.tool_calls:
+                args = json.loads(tc.function.arguments or "{}")
+                tool_result = self._execute_tool(tc.function.name, args, repo_path)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_result,
+                })
+
+        # max_rounds exhausted — return the last assistant content seen
+        for entry in reversed(messages):
+            if entry.get("role") == "assistant" and entry.get("content"):
+                return entry["content"]
+        return ""
 
     def plan_repo(self, repo_path: Path) -> BuildPlan:
         files = sorted(str(p.relative_to(repo_path)).replace("\\", "/") for p in repo_path.rglob("*") if p.is_file())

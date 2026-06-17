@@ -219,6 +219,22 @@ Equivalent module invocation:
 python -m orchestrator.main run --repo ../resume-scorer --cluster default --registry ghcr.io/meerolla/resume-scorer --namespace my-app --goal "given an app repo, set up CI/CD and deploy it"
 ```
 
+### Optional repo config: pipeline-setup.yaml
+
+If `pipeline-setup.yaml` exists at repo root, Planner uses it as authoritative config for supported BuildPlan fields:
+- `language`
+- `framework`
+- `entrypoint`
+- `ports`
+- `test_command`
+- `stateful`
+- `needs_db`
+
+Planning precedence is:
+- CLI flags
+- `pipeline-setup.yaml`
+- Planner inference from repo evidence
+
 Bootstrap run executes pre-merge phase only (plan/build/test/scan/provision/finalize).
 Post-merge deployment activates automatically through generated GitHub workflow.
 
@@ -276,6 +292,7 @@ Generated assets are committed and draft PR is opened by default.
 After a run, validate generated outputs are app-specific:
 - Dockerfile runtime command matches framework (for FastAPI use uvicorn command, not generic http.server).
 - BuildPlan fields differ across different app fixtures (for example Python/FastAPI versus Node/Express).
+- `.github/workflows/ci.yml` matches app language (Python/Node/Java setup and test command).
 - Diagnose-Fix suggestions remain inside generated artifact boundaries.
 
 ### Expected generated artifacts

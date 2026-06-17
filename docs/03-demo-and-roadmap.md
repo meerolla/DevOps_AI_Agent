@@ -16,12 +16,14 @@ Not "more agents." The demo point is trusted adaptation with safety.
 ## What the Audience Sees
 
 1. Provide fresh app repo and goal.
-2. Planner agent inspects repo files and outputs app-specific structured plan.
+2. Planner agent inspects repo files (provider mode can tool-call read/list iteratively) and outputs app-specific structured plan.
 3. Dockerizer agent writes framework-specific Dockerfile; build tool builds image.
-4. Tests and scan run. Introduce failure. Diagnose-Fix proposes remediation and retries step.
-5. Infra approval gate pause and approval; in sandbox this can show plan/apply behavior.
-6. Finalize commits generated assets and opens draft PR.
-7. Merge PR to main and show automatic post-merge activation workflow deploying via Helm + ArgoCD and running healthcheck.
+4. Generated CI workflow reflects app language (Python/Node/Java) and test command.
+5. Tests and scan run. Introduce failure. Diagnose-Fix proposes remediation and retries step.
+6. Optional `pipeline-setup.yaml` values can override inferred planning fields for deterministic app setup.
+7. Infra approval gate pause and approval; in sandbox this can show plan/apply behavior.
+8. Finalize commits generated assets and opens draft PR.
+9. Merge PR to main and show automatic post-merge activation workflow deploying via Helm + ArgoCD and running healthcheck.
 
 ## Demo Beats
 
