@@ -160,11 +160,13 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{{{ github.repository_owner }}}}
+          username: ${{{{ github.actor }}}}
           password: ${{{{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}}}
       - name: Build and push image
         run: |
-          docker build -t "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}" .
+          docker build \
+            --label "org.opencontainers.image.source=${{GITHUB_SERVER_URL}}/${{GITHUB_REPOSITORY}}" \
+            -t "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}" .
           docker push "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}"
       - name: Bump Helm image tag
         run: |

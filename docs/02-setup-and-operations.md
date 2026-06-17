@@ -135,6 +135,7 @@ kubectl -n <app-namespace> create secret docker-registry ghcr-pull \
 For GitHub Actions image push in generated `ci.yml`:
 - Preferred: set repository secret `GHCR_TOKEN` to a PAT with `write:packages` and `read:packages`.
 - Fallback: workflow uses `GITHUB_TOKEN` when `GHCR_TOKEN` is not set.
+- Generated login uses `github.actor` and labels the image with `org.opencontainers.image.source` to improve package-to-repo linkage in GHCR.
 
 If CI fails with `denied: permission_denied: write_package`, verify:
 - Repo setting `Settings -> Actions -> General -> Workflow permissions` is `Read and write`.
