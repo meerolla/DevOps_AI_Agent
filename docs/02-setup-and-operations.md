@@ -172,6 +172,7 @@ helm version
 ### Step 7: Configure self-hosted runner for post-merge activation
 
 The generated workflow `.github/workflows/post-merge-activate.yml` runs on `self-hosted` runner labels.
+It is triggered by successful completion of the generated `ci` workflow on `main`.
 
 #### 7.1 Prepare runner host
 
@@ -247,6 +248,7 @@ Planning precedence is:
 
 Bootstrap run executes pre-merge phase only (plan/build/test/scan/provision/finalize).
 Post-merge deployment activates automatically through generated GitHub workflow.
+The release chain is: merge to `main` -> `ci` builds and pushes image -> `ci` updates `deploy/helm/values.yaml` tag -> `post-merge-activate` deploys the tag recorded in Helm values.
 
 ### Validate provider mode is active
 
