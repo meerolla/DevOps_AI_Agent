@@ -32,6 +32,9 @@ def test_generated_ci_workflow_has_pr_and_main_tracks(tmp_path: Path) -> None:
     assert "build-and-bump:" in ci_text
     assert "github.event_name == 'push'" in ci_text
     assert "docker/login-action@v3" in ci_text
+    assert "username: ${{ github.actor }}" in ci_text
+    assert "password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}" in ci_text
+    assert "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" in ci_text
     assert "helm_values.py set-tag" in ci_text
     assert "deploy/helm/values.yaml" in ci_text
     assert "[skip ci]" in ci_text
