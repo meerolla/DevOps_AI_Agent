@@ -100,10 +100,14 @@ def test_generated_post_merge_activation_workflow(tmp_path: Path) -> None:
     workflow_path = tmp_path / ".github" / "workflows" / "post-merge-activate.yml"
     workflow_text = workflow_path.read_text(encoding="utf-8")
     assert "name: post-merge-activate" in workflow_text
-    assert "push:" in workflow_text
-    assert "branches: [main]" in workflow_text
+    assert "workflow_run:" in workflow_text
+    assert "workflows: [ci]" in workflow_text
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow_text
+    assert "github.event.workflow_run.head_branch == 'main'" in workflow_text
     assert "runs-on: [self-hosted]" in workflow_text
+    assert "helm_values.py get-tag --file deploy/helm/values.yaml" in workflow_text
     assert "helm upgrade --install" in workflow_text
+    assert "--set image.tag=\"$IMAGE_TAG\"" in workflow_text
     assert "kubectl --context \"default\" apply -f deploy/argocd/application.yaml" in workflow_text
     assert "argocd app sync \"$APP_NAME\" --server \"$ARGOCD_SERVER\" --grpc-web" in workflow_text
     assert "ARGOCD_SERVER not set; skipping manual argocd sync" in workflow_text
@@ -140,6 +144,29 @@ def test_generated_helm_values_helper_updates_tag(tmp_path: Path) -> None:
 
     updated = values_path.read_text(encoding="utf-8")
     assert "tag: abc123" in updated
+
+
+def test_generated_helm_values_helper_reads_tag(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+
+    generate_pipeline_artifacts(state, plan)
+
+    helper_path = tmp_path / ".github" / "scripts" / "helm_values.py"
+    values_path = tmp_path / "deploy" / "helm" / "values.yaml"
+
+    output = subprocess.check_output(
+        [
+            sys.executable,
+            str(helper_path),
+            "get-tag",
+            "--file",
+            str(values_path),
+        ],
+        text=True,
+    ).strip()
+
+    assert output == "latest"
 
 
 def test_generated_yaml_is_valid_for_non_template_files(tmp_path: Path) -> None:

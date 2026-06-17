@@ -212,6 +212,24 @@ def _get_repository(path: Path) -> str:
   raise ValueError(f"image.repository not found in {path}")
 
 
+def _get_tag(path: Path) -> str:
+  lines = _read_lines(path)
+  in_image = False
+  for line in lines:
+    stripped = line.strip()
+    if not in_image and stripped == "image:":
+      in_image = True
+      continue
+    if in_image:
+      if stripped == "":
+        continue
+      if not line.startswith((" ", "\t")):
+        break
+      if stripped.startswith("tag:"):
+        return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+  raise ValueError(f"image.tag not found in {path}")
+
+
 def _set_tag(path: Path, tag: str) -> None:
   lines = _read_lines(path)
   in_image = False
@@ -244,6 +262,9 @@ def main() -> int:
     get_repo = sub.add_parser("get-repository", help="Print image.repository")
     get_repo.add_argument("--file", required=True)
 
+    get_tag = sub.add_parser("get-tag", help="Print image.tag")
+    get_tag.add_argument("--file", required=True)
+
     set_tag = sub.add_parser("set-tag", help="Update image.tag")
     set_tag.add_argument("--file", required=True)
     set_tag.add_argument("--tag", required=True)
@@ -254,6 +275,10 @@ def main() -> int:
     if args.command == "get-repository":
         print(_get_repository(values_path))
         return 0
+
+    if args.command == "get-tag":
+      print(_get_tag(values_path))
+      return 0
 
     if args.command == "set-tag":
         _set_tag(values_path, args.tag)
@@ -290,16 +315,14 @@ def _workflow_post_merge_activate(cluster: str, namespace: str) -> str:
     workflow = """name: post-merge-activate
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'deploy/**'
-      - 'Dockerfile'
-      - '.github/workflows/**'
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
   workflow_dispatch:
 
 jobs:
   activate:
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: [self-hosted]
     permissions:
       contents: read
@@ -312,6 +335,10 @@ jobs:
         run: |
           repo=$(python .github/scripts/helm_values.py get-repository --file deploy/helm/values.yaml)
           echo "IMAGE_REPOSITORY=$repo" >> "$GITHUB_ENV"
+      - name: Resolve image tag
+        run: |
+          tag=$(python .github/scripts/helm_values.py get-tag --file deploy/helm/values.yaml)
+          echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
       - name: Resolve application name
         run: |
           app_name=$(basename "$GITHUB_REPOSITORY")
@@ -322,7 +349,7 @@ jobs:
             --namespace "__NAMESPACE__" --create-namespace \
             --kube-context "__CLUSTER__" \
             --set image.repository="$IMAGE_REPOSITORY" \
-            --set image.tag="${GITHUB_SHA}"
+            --set image.tag="$IMAGE_TAG"
       - name: Apply ArgoCD application
         run: kubectl --context "__CLUSTER__" apply -f deploy/argocd/application.yaml
       - name: Optional ArgoCD sync
