@@ -132,6 +132,15 @@ kubectl -n <app-namespace> create secret docker-registry ghcr-pull \
   --docker-password="<GITHUB_PAT>"
 ```
 
+For GitHub Actions image push in generated `ci.yml`:
+- Preferred: set repository secret `GHCR_TOKEN` to a PAT with `write:packages` and `read:packages`.
+- Fallback: workflow uses `GITHUB_TOKEN` when `GHCR_TOKEN` is not set.
+
+If CI fails with `denied: permission_denied: write_package`, verify:
+- Repo setting `Settings -> Actions -> General -> Workflow permissions` is `Read and write`.
+- GHCR package `ghcr.io/<owner>/<repo>` grants the repository Actions access in package settings.
+- `GHCR_TOKEN` (if used) belongs to an account allowed to write that package.
+
 ### Step 5: LLM mode and provider setup
 
 Use these settings in the same shell/session that invokes `pipeline-setup` or `python -m orchestrator.main`.

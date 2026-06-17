@@ -160,8 +160,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{{{ github.actor }}}}
-          password: ${{{{ secrets.GITHUB_TOKEN }}}}
+          username: ${{{{ github.repository_owner }}}}
+          password: ${{{{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}}}
       - name: Build and push image
         run: |
           docker build -t "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}" .
