@@ -35,6 +35,57 @@ def test_generated_ci_workflow_has_pr_and_main_tracks(tmp_path: Path) -> None:
     assert "helm_values.py set-tag" in ci_text
     assert "deploy/helm/values.yaml" in ci_text
     assert "[skip ci]" in ci_text
+    # Python-specific
+    assert "setup-python" in ci_text
+    assert "pip install -r requirements.txt" in ci_text
+    assert "pytest -q" in ci_text
+    assert "setup-node" not in ci_text
+    assert "setup-java" not in ci_text
+
+
+def test_ci_workflow_node_language(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="node", test_command="npm test")
+
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "setup-node" in ci_text
+    assert "node-version: '20'" in ci_text
+    assert "npm ci" in ci_text
+    assert "npm test" in ci_text
+    assert "setup-python" not in ci_text
+    assert "pip install" not in ci_text
+    assert "pytest" not in ci_text
+
+
+def test_ci_workflow_java_language(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="java", test_command="mvn test --no-transfer-progress")
+
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "setup-java" in ci_text
+    assert "temurin" in ci_text
+    assert "mvn test" in ci_text
+    assert "setup-python" not in ci_text
+    assert "pip install" not in ci_text
+    assert "npm" not in ci_text
+
+
+def test_ci_workflow_unknown_language_defaults_to_python(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="unknown", test_command="pytest -q")
+
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "setup-python" in ci_text
+    assert "pip install -r requirements.txt" in ci_text
 
 
 def test_generated_post_merge_activation_workflow(tmp_path: Path) -> None:

@@ -65,8 +65,68 @@ def _git_short_sha(repo: Path) -> str:
   return "unknown"
 
 
-def _workflow_ci() -> str:
-    return """name: ci
+def _ci_setup_steps(language: str) -> str:
+    """Return YAML steps (indented 6 spaces) for env setup + dep install based on language."""
+    lang = language.lower()
+    if lang in ("node", "nodejs", "javascript", "typescript"):
+        return """\
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: npm ci"""
+    if lang == "java":
+        return """\
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'"""
+    # default: python
+    return """\
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install -r requirements.txt"""
+
+
+def _ci_test_command(plan: BuildPlan) -> str:
+    """Return the test command to use in CI."""
+    if plan.test_command and plan.test_command not in ("unknown", ""):
+        return plan.test_command
+    lang = plan.language.lower()
+    if lang in ("node", "nodejs", "javascript", "typescript"):
+        return "npm test"
+    if lang == "java":
+        return "mvn test --no-transfer-progress"
+    return "pytest -q"
+
+
+def _ci_build_setup_steps(language: str) -> str:
+    """Return YAML steps for the build-and-bump job's language setup (before docker steps)."""
+    lang = language.lower()
+    if lang in ("node", "nodejs", "javascript", "typescript"):
+        return """\
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'"""
+    if lang == "java":
+        return """\
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'"""
+    return """\
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'"""
+
+
+def _workflow_ci(plan: BuildPlan) -> str:
+    setup_steps = _ci_setup_steps(plan.language)
+    test_cmd = _ci_test_command(plan)
+    build_setup_steps = _ci_build_setup_steps(plan.language)
+    return f"""name: ci
 
 on:
   push:
@@ -78,16 +138,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install deps
-        run: pip install -r requirements.txt
+{setup_steps}
       - name: Run tests
-        run: pytest -q
+        run: {test_cmd}
 
   build-and-bump:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}}}
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -95,9 +151,7 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+{build_setup_steps}
       - name: Resolve image repository from Helm values
         run: |
           repo=$(python .github/scripts/helm_values.py get-repository --file deploy/helm/values.yaml)
@@ -106,22 +160,22 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{{{ github.actor }}}}
+          password: ${{{{ secrets.GITHUB_TOKEN }}}}
       - name: Build and push image
         run: |
-          docker build -t "${IMAGE_REPOSITORY}:${GITHUB_SHA}" .
-          docker push "${IMAGE_REPOSITORY}:${GITHUB_SHA}"
+          docker build -t "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}" .
+          docker push "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}"
       - name: Bump Helm image tag
         run: |
-          python .github/scripts/helm_values.py set-tag --file deploy/helm/values.yaml --tag "${GITHUB_SHA}"
+          python .github/scripts/helm_values.py set-tag --file deploy/helm/values.yaml --tag "${{GITHUB_SHA}}"
       - name: Commit and push image tag bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add deploy/helm/values.yaml
           git diff --cached --quiet && echo "No image tag change to commit" && exit 0
-          git commit -m "chore(ci): bump image tag to ${GITHUB_SHA} [skip ci]"
+          git commit -m "chore(ci): bump image tag to ${{GITHUB_SHA}} [skip ci]"
           git push
 """
 
@@ -446,7 +500,7 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     files.append(dockerfile_path)
 
     ci_path = workflow_dir / "ci.yml"
-    ci_path.write_text(_workflow_ci(), encoding="utf-8")
+    ci_path.write_text(_workflow_ci(plan), encoding="utf-8")
     files.append(ci_path)
 
     helm_values_helper_path = workflow_scripts_dir / "helm_values.py"

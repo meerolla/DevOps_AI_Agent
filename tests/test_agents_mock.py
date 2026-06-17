@@ -197,3 +197,57 @@ def test_full_run_mock_sandbox_app_bug_escalates(tmp_path: Path) -> None:
     # audit log contains no secrets
     for entry in final_state.audit:
         assert "ghp_" not in entry.details
+
+
+# ── H5: pipeline-setup.yaml precedence ───────────────────────────────────────
+
+def test_planner_config_overrides_inferred_language(tmp_path: Path) -> None:
+    """pipeline-setup.yaml language field overrides what the planner would infer from files."""
+    import os
+    os.environ["LLM_MODE"] = "mock"
+
+    # Repo has a requirements.txt that would make the mock planner infer python
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+
+    # pipeline-setup.yaml explicitly declares java
+    (tmp_path / "pipeline-setup.yaml").write_text("language: java\nframework: springboot\n", encoding="utf-8")
+
+    from orchestrator.agents.planner import run_planner
+    plan = run_planner(tmp_path)
+
+    assert plan.language == "java"
+    assert plan.framework == "springboot"
+
+
+def test_planner_config_overrides_test_command(tmp_path: Path) -> None:
+    """test_command in pipeline-setup.yaml takes precedence over inference."""
+    import os
+    os.environ["LLM_MODE"] = "mock"
+
+    (tmp_path / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text("def test_dummy(): pass\n", encoding="utf-8")
+    # Without config, mock would infer "pytest -q"
+    (tmp_path / "pipeline-setup.yaml").write_text("test_command: pytest -v --tb=short\n", encoding="utf-8")
+
+    from orchestrator.agents.planner import run_planner
+    plan = run_planner(tmp_path)
+
+    assert plan.test_command == "pytest -v --tb=short"
+
+
+def test_planner_no_config_file_uses_inference(tmp_path: Path) -> None:
+    """When pipeline-setup.yaml is absent, inference is used as normal."""
+    import os
+    os.environ["LLM_MODE"] = "mock"
+
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / "app" / "main.py").parent.mkdir(parents=True)
+    (tmp_path / "app" / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+
+    from orchestrator.agents.planner import run_planner
+    plan = run_planner(tmp_path)
+
+    assert plan.language == "python"
+    assert plan.framework == "fastapi"

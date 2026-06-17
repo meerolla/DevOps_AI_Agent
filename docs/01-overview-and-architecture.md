@@ -27,8 +27,14 @@ This project does not treat agents as static templates. Agent outputs must be ap
 
 1. Planner contract
 - Must inspect repo files using read/list capabilities.
+- In provider mode, may iteratively call repo read/list tools to explore before finalizing output.
 - Must identify language/framework/entrypoint/ports/tests from evidence.
 - Must mark unknowns explicitly rather than guessing.
+
+Planning precedence for BuildPlan fields is:
+- CLI flags
+- pipeline-setup.yaml
+- Planner inference from repo evidence
 
 2. Dockerizer contract
 - Must generate framework-specific Dockerfiles from the current BuildPlan and repo evidence.
@@ -97,7 +103,7 @@ flowchart TD
    -> Dockerizer (agent) + build (tool)
    -> test (tool), scan (tool) with Diagnose-Fix retry loop
    -> infra approval + provision
-   -> finalize: validate artifacts, commit, draft PR
+   -> finalize: validate artifacts, generate language-aware CI/GitOps assets, commit, draft PR
 ```
 
 ### Phase B: Activation (post-merge automation)
