@@ -272,7 +272,11 @@ jobs:
       - name: Optional ArgoCD sync
         run: |
           if command -v argocd >/dev/null 2>&1; then
-            argocd app sync "$APP_NAME" --grpc-web
+            if [ -n "${ARGOCD_SERVER:-}" ]; then
+              argocd app sync "$APP_NAME" --server "$ARGOCD_SERVER" --grpc-web || echo "argocd sync failed; relying on automated sync policy"
+            else
+              echo "ARGOCD_SERVER not set; skipping manual argocd sync and relying on automated sync policy"
+            fi
           else
             echo "argocd CLI not found on runner; relying on automated sync policy"
           fi
