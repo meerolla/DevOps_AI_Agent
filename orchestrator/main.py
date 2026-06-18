@@ -68,6 +68,7 @@ def run_command(
     auto_approve: bool,
     auto_commit: bool,
     auto_draft_pr: bool,
+    require_tests: bool = False,
 ) -> int:
     state = PipelineState(
         goal=goal,
@@ -78,6 +79,7 @@ def run_command(
         app_name=Path(registry.split(":")[0]).name,
         auto_commit=auto_commit,
         auto_draft_pr=auto_draft_pr,
+        require_tests=require_tests,
     )
     final_state = run_pipeline(state, auto_approve=auto_approve, phase="bootstrap")
 
@@ -172,6 +174,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--auto-approve", action="store_true", help="Auto approve both gates")
     run_parser.add_argument("--no-auto-commit", action="store_true", help="Disable auto-commit of generated artifacts")
     run_parser.add_argument("--no-draft-pr", action="store_true", help="Disable automatic draft PR creation")
+    run_parser.add_argument(
+        "--require-tests",
+        action="store_true",
+        help="Fail the pipeline if no test surface is detected (default: skip with warning)",
+    )
 
     activate_parser = sub.add_parser("activate", help="Run post-merge deploy activation workflow")
     activate_parser.add_argument("--repo", required=True, help="Repository path")
@@ -219,6 +226,7 @@ def main() -> int:
             auto_approve=args.auto_approve,
             auto_commit=not args.no_auto_commit,
             auto_draft_pr=not args.no_draft_pr,
+            require_tests=args.require_tests,
         )
 
     if args.command == "approve":

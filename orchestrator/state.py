@@ -75,6 +75,7 @@ class PipelineState(BaseModel):
     pull_secret_name: str = "ghcr-pull-secret"
     auto_commit: bool = True
     auto_draft_pr: bool = True
+    require_tests: bool = False
     build_plan: Optional[BuildPlan] = None
     dockerfile_ref: Optional[str] = None
     image_ref: Optional[str] = None
