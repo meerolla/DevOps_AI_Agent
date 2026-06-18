@@ -201,7 +201,7 @@ def test_run_tests_uses_docker_run_with_image_ref(monkeypatch, tmp_path: Path) -
 
     result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:sha-abc123")
     assert result.ok is True
-    assert "docker run --rm ghcr.io/demo/app:sha-abc123 pytest -q" == captured["command"]
+    assert f"docker run --rm -v {tmp_path.resolve()}:/workspace -w /workspace ghcr.io/demo/app:sha-abc123 pytest -q" == captured["command"]
     assert result.details == "tests executed in container"
 
 
@@ -248,3 +248,32 @@ def test_run_tests_detects_test_files_in_root(monkeypatch, tmp_path: Path) -> No
     result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:latest")
     assert result.ok is True
     assert "docker run" in captured["command"]
+
+
+def test_run_tests_skips_when_container_reports_no_tests_collected(monkeypatch, tmp_path: Path) -> None:
+    """pytest exit 5 ('no tests ran') inside container should skip, not fail."""
+    monkeypatch.setenv("SANDBOX", "0")
+    (tmp_path / "tests").mkdir()
+
+    def fake_run(command: str, cwd: Path, env=None):
+        return False, "no tests ran in 0.00s\n"
+
+    monkeypatch.setattr(test_mod, "run_command", fake_run)
+
+    result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:latest")
+    assert result.ok is True
+    assert result.details == "tests_skipped_no_tests_detected"
+
+
+def test_run_tests_require_tests_fails_on_container_no_tests_collected(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SANDBOX", "0")
+    (tmp_path / "tests").mkdir()
+
+    def fake_run(command: str, cwd: Path, env=None):
+        return False, "collected 0 items\n\nno tests ran in 0.00s\n"
+
+    monkeypatch.setattr(test_mod, "run_command", fake_run)
+
+    result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:latest", require_tests=True)
+    assert result.ok is False
+    assert result.details == "tests_required_but_none_detected"
