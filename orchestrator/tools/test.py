@@ -25,6 +25,20 @@ def _has_test_surface(repo_path: Path, test_command: str) -> bool:
     return True
 
 
+_NO_TESTS_COLLECTED_PATTERNS = (
+    "no tests ran",
+    "no tests were run",
+    "collected 0 items",
+    "no tests collected",
+)
+
+
+def _is_no_tests_collected(output: str) -> bool:
+    """Return True if the runner found no test functions (pytest exit 5 etc.)."""
+    lowered = output.lower()
+    return any(pattern in lowered for pattern in _NO_TESTS_COLLECTED_PATTERNS)
+
+
 def run_tests(
     repo_path: Path,
     test_command: str,
@@ -59,8 +73,28 @@ def run_tests(
             output="image_ref is not set; cannot run tests inside container. Ensure build step completed.",
         )
 
-    command = f"docker run --rm {image_ref} {test_command}"
+    # Mount the repo into the container so test files are available regardless
+    # of what the Dockerfile chose to COPY. The image provides the runtime
+    # (Python + installed dependencies); the host checkout provides the tests.
+    repo_abs = str(repo_path.resolve())
+    command = f"docker run --rm -v {repo_abs}:/workspace -w /workspace {image_ref} {test_command}"
     ok, output = run_command(command, cwd=repo_path)
+
+    if not ok and _is_no_tests_collected(output):
+        if require_tests:
+            return ToolResult(
+                ok=False,
+                step="test",
+                details="tests_required_but_none_detected",
+                output=output,
+            )
+        return ToolResult(
+            ok=True,
+            step="test",
+            details="tests_skipped_no_tests_detected",
+            output=output,
+        )
+
     return ToolResult(
         ok=ok,
         step="test",
