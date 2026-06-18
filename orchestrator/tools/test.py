@@ -43,8 +43,11 @@ def run_tests(
     repo_path: Path,
     test_command: str,
     image_ref: str | None = None,
+    test_image_ref: str | None = None,
     require_tests: bool = False,
 ) -> ToolResult:
+    # Prefer the dedicated test-stage image; fall back to the runtime image
+    effective_image = test_image_ref or image_ref
     if not _has_test_surface(repo_path, test_command):
         if require_tests:
             return ToolResult(
@@ -65,7 +68,7 @@ def run_tests(
             return ToolResult(ok=False, step="test", details="forced test failure", output="forced")
         return ToolResult(ok=True, step="test", details="sandbox test pass", output="sandbox: no tests run")
 
-    if not image_ref:
+    if not effective_image:
         return ToolResult(
             ok=False,
             step="test",
@@ -77,7 +80,7 @@ def run_tests(
     # of what the Dockerfile chose to COPY. The image provides the runtime
     # (Python + installed dependencies); the host checkout provides the tests.
     repo_abs = str(repo_path.resolve())
-    command = f"docker run --rm -v {repo_abs}:/workspace -w /workspace {image_ref} {test_command}"
+    command = f"docker run --rm -v {repo_abs}:/workspace -w /workspace {effective_image} {test_command}"
     ok, output = run_command(command, cwd=repo_path)
 
     if not ok and _is_no_tests_collected(output):

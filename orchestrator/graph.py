@@ -74,6 +74,7 @@ def _node_build(state: OrchestratorGraphState) -> OrchestratorGraphState:
             return state
 
         pipeline_state.image_ref = build_result.artifact_ref or image_tag
+        pipeline_state.test_image_ref = build_result.test_artifact_ref or pipeline_state.image_ref
         pipeline_state.mark_step("dockerize", "ok")
         pipeline_state.mark_step("build", "ok")
         append_audit(pipeline_state, "dockerize", "agent", "ok", f"dockerfile={dockerfile_ref}")
@@ -90,6 +91,7 @@ def _node_test(state: OrchestratorGraphState) -> OrchestratorGraphState:
             repo_path,
             pipeline_state.build_plan.test_command,
             image_ref=pipeline_state.image_ref,
+            test_image_ref=pipeline_state.test_image_ref,
             require_tests=pipeline_state.require_tests,
         )
         pipeline_state.test_results = result.output

@@ -50,6 +50,7 @@ class ToolResult(BaseModel):
     details: str = ""
     output: str = ""
     artifact_ref: Optional[str] = None
+    test_artifact_ref: Optional[str] = None
 
 
 class AuditEntry(BaseModel):
@@ -79,6 +80,7 @@ class PipelineState(BaseModel):
     build_plan: Optional[BuildPlan] = None
     dockerfile_ref: Optional[str] = None
     image_ref: Optional[str] = None
+    test_image_ref: Optional[str] = None
     test_results: Optional[str] = None
     scan_report: Optional[str] = None
     manifests_ref: Optional[str] = None

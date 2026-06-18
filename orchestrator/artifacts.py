@@ -135,6 +135,7 @@ on:
 
 jobs:
   test:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -143,7 +144,7 @@ jobs:
         run: {test_cmd}
 
   build-and-bump:
-    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}}}
+    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]') }}}}
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -162,6 +163,18 @@ jobs:
           registry: ghcr.io
           username: ${{{{ github.actor }}}}
           password: ${{{{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}}}
+      - name: Build test image
+        run: |
+          docker build --target test \
+            -t "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" . || \
+          docker build -t "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" .
+      - name: Run tests inside container
+        run: |
+          docker run --rm \
+            -v "${{{{ github.workspace }}}}":/workspace \
+            -w /workspace \
+            "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" \
+            {test_cmd}
       - name: Build and push image
         run: |
           docker build \
@@ -195,64 +208,64 @@ def _read_lines(path: Path) -> list[str]:
 
 
 def _get_repository(path: Path) -> str:
-  lines = _read_lines(path)
-  in_image = False
-  for line in lines:
-    stripped = line.strip()
-    if not in_image and stripped == "image:":
-      in_image = True
-      continue
-    if in_image:
-      if stripped == "":
-        continue
-      if not line.startswith((" ", "\t")):
-        break
-      if stripped.startswith("repository:"):
-        return stripped.split(":", 1)[1].strip().strip('"').strip("'")
-  raise ValueError(f"image.repository not found in {path}")
+    lines = _read_lines(path)
+    in_image = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_image and stripped == "image:":
+            in_image = True
+            continue
+        if in_image:
+            if stripped == "":
+                continue
+            if not line.startswith((" ", "\t")):
+                break
+            if stripped.startswith("repository:"):
+                return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+    raise ValueError(f"image.repository not found in {path}")
 
 
 def _get_tag(path: Path) -> str:
-  lines = _read_lines(path)
-  in_image = False
-  for line in lines:
-    stripped = line.strip()
-    if not in_image and stripped == "image:":
-      in_image = True
-      continue
-    if in_image:
-      if stripped == "":
-        continue
-      if not line.startswith((" ", "\t")):
-        break
-      if stripped.startswith("tag:"):
-        return stripped.split(":", 1)[1].strip().strip('"').strip("'")
-  raise ValueError(f"image.tag not found in {path}")
+    lines = _read_lines(path)
+    in_image = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_image and stripped == "image:":
+            in_image = True
+            continue
+        if in_image:
+            if stripped == "":
+                continue
+            if not line.startswith((" ", "\t")):
+                break
+            if stripped.startswith("tag:"):
+                return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+    raise ValueError(f"image.tag not found in {path}")
 
 
 def _set_tag(path: Path, tag: str) -> None:
-  lines = _read_lines(path)
-  in_image = False
-  updated = False
-  for idx, line in enumerate(lines):
-    stripped = line.strip()
-    if not in_image and stripped == "image:":
-      in_image = True
-      continue
-    if in_image:
-      if stripped == "":
-        continue
-      if not line.startswith((" ", "\t")):
-        break
-      if stripped.startswith("tag:"):
-        indent = line[: len(line) - len(line.lstrip(" \t"))]
-        newline = "\\n" if line.endswith("\\n") else ""
-        lines[idx] = f"{indent}tag: {tag}{newline}"
-        updated = True
-        break
-  if not updated:
-    raise ValueError(f"image.tag not found in {path}")
-  path.write_text("".join(lines), encoding="utf-8")
+    lines = _read_lines(path)
+    in_image = False
+    updated = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not in_image and stripped == "image:":
+            in_image = True
+            continue
+        if in_image:
+            if stripped == "":
+                continue
+            if not line.startswith((" ", "\t")):
+                break
+            if stripped.startswith("tag:"):
+                indent = line[: len(line) - len(line.lstrip(" \t"))]
+                newline = "\\n" if line.endswith("\\n") else ""
+                lines[idx] = f"{indent}tag: {tag}{newline}"
+                updated = True
+                break
+    if not updated:
+        raise ValueError(f"image.tag not found in {path}")
+    path.write_text("".join(lines), encoding="utf-8")
 
 
 def main() -> int:
@@ -277,8 +290,8 @@ def main() -> int:
         return 0
 
     if args.command == "get-tag":
-      print(_get_tag(values_path))
-      return 0
+        print(_get_tag(values_path))
+        return 0
 
     if args.command == "set-tag":
         _set_tag(values_path, args.tag)
@@ -343,13 +356,6 @@ jobs:
         run: |
           app_name=$(basename "$GITHUB_REPOSITORY")
           echo "APP_NAME=$app_name" >> "$GITHUB_ENV"
-      - name: Helm deploy
-        run: |
-          helm upgrade --install "$APP_NAME" ./deploy/helm \
-            --namespace "__NAMESPACE__" --create-namespace \
-            --kube-context "__CLUSTER__" \
-            --set image.repository="$IMAGE_REPOSITORY" \
-            --set image.tag="$IMAGE_TAG"
       - name: Apply ArgoCD application
         run: kubectl --context "__CLUSTER__" apply -f deploy/argocd/application.yaml
       - name: Optional ArgoCD sync
@@ -394,21 +400,21 @@ def _helm_deployment(app_name: str, pull_secret_name: str) -> str:
     return f"""apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {app_name}
+  name: {{{{ .Release.Name }}}}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {app_name}
+      app: {{{{ .Release.Name }}}}
   template:
     metadata:
       labels:
-        app: {app_name}
+        app: {{{{ .Release.Name }}}}
     spec:
       imagePullSecrets:
         - name: {pull_secret_name}
       containers:
-        - name: {app_name}
+        - name: {{{{ .Release.Name }}}}
           image: \"{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}\"
           ports:
             - containerPort: {{{{ .Values.containerPort }}}}
@@ -428,11 +434,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {app_name}
+  name: {{{{ .Release.Name }}}}
 spec:
   type: {{{{ .Values.service.type | default \"ClusterIP\" }}}}
   selector:
-    app: {app_name}
+    app: {{{{ .Release.Name }}}}
   ports:
     - port: {{{{ .Values.service.port | default .Values.containerPort }}}}
       targetPort: {{{{ .Values.containerPort }}}}
@@ -513,11 +519,18 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
         dockerfile_path.write_text(
             "\n".join(
                 [
-                    "FROM python:3.12.3-slim AS runtime",
+                    "FROM python:3.12.3-slim AS base",
                     "WORKDIR /app",
                     "RUN useradd -m appuser",
+                    "COPY requirements.txt /app/requirements.txt",
+                    "RUN pip install --no-cache-dir -r requirements.txt",
+                    "",
+                    "FROM base AS test",
+                    "RUN pip install --no-cache-dir pytest pytest-cov",
                     "COPY . /app",
-                    "RUN pip install --no-cache-dir pytest==8.2.2",
+                    "",
+                    "FROM base AS runtime",
+                    "COPY . /app",
                     f"EXPOSE {port}",
                     "USER appuser",
                     f"CMD [\"python\", \"-m\", \"http.server\", \"{port}\"]",
