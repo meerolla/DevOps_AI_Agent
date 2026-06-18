@@ -135,7 +135,7 @@ on:
 
 jobs:
   test:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    if: ${{{{ !contains((github.event.head_commit.message || github.event.pull_request.title || ''), '[skip ci]') }}}}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -144,7 +144,7 @@ jobs:
         run: {test_cmd}
 
   build-and-bump:
-    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]') }}}}
+    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains((github.event.head_commit.message || ''), '[skip ci]') }}}}
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -171,10 +171,12 @@ jobs:
       - name: Run tests inside container
         run: |
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
             -v "${{{{ github.workspace }}}}":/workspace \
             -w /workspace \
             "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" \
-            {test_cmd}
+            {test_cmd} -p no:cacheprovider
       - name: Build and push image
         run: |
           docker build \
@@ -354,7 +356,7 @@ jobs:
           echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
       - name: Resolve application name
         run: |
-          app_name=$(basename "$GITHUB_REPOSITORY")
+          app_name=$(python -c "import yaml; print(yaml.safe_load(open('deploy/argocd/application.yaml'))['metadata']['name'])")
           echo "APP_NAME=$app_name" >> "$GITHUB_ENV"
       - name: Apply ArgoCD application
         run: kubectl --context "__CLUSTER__" apply -f deploy/argocd/application.yaml
@@ -381,7 +383,7 @@ appVersion: \"{app_version}\"
 """
 
 
-def _helm_values(registry: str, port: int, health_path: str) -> str:
+def _helm_values(registry: str, port: int, health_path: str, pull_secret_name: str = "ghcr-pull-secret") -> str:
     repo, tag = registry.rsplit(":", 1) if ":" in registry else (registry, "latest")
     return f"""image:
   repository: {repo}
@@ -389,6 +391,7 @@ def _helm_values(registry: str, port: int, health_path: str) -> str:
 
 containerPort: {port}
 healthPath: {health_path}
+pullSecretName: {pull_secret_name}
 
 service:
   type: ClusterIP
@@ -396,7 +399,7 @@ service:
 """
 
 
-def _helm_deployment(app_name: str, pull_secret_name: str) -> str:
+def _helm_deployment(app_name: str) -> str:
     return f"""apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -412,7 +415,7 @@ spec:
         app: {{{{ .Release.Name }}}}
     spec:
       imagePullSecrets:
-        - name: {pull_secret_name}
+        - name: {{{{ .Values.pullSecretName }}}}
       containers:
         - name: {{{{ .Release.Name }}}}
           image: \"{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}\"
@@ -476,9 +479,9 @@ def regenerate_helm_config(state: PipelineState) -> list[Path]:
     port = _resolve_port(state.build_plan) if state.build_plan else 8000
     health_path = _detect_health_path(repo)
     values_path = repo / "deploy" / "helm" / "values.yaml"
-    values_path.write_text(_helm_values(state.image_ref_for_registry(), port, health_path), encoding="utf-8")
+    values_path.write_text(_helm_values(state.image_ref_for_registry(), port, health_path, state.pull_secret_name), encoding="utf-8")
     deployment_path = repo / "deploy" / "helm" / "templates" / "deployment.yaml"
-    deployment_path.write_text(_helm_deployment(state.app_name, state.pull_secret_name), encoding="utf-8")
+    deployment_path.write_text(_helm_deployment(state.app_name), encoding="utf-8")
     return [values_path, deployment_path]
 
 
@@ -562,11 +565,11 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     files.append(chart_path)
 
     values_path = repo / "deploy" / "helm" / "values.yaml"
-    values_path.write_text(_helm_values(state.image_ref_for_registry(), port, health_path), encoding="utf-8")
+    values_path.write_text(_helm_values(state.image_ref_for_registry(), port, health_path, state.pull_secret_name), encoding="utf-8")
     files.append(values_path)
 
     deployment_path = helm_templates / "deployment.yaml"
-    deployment_path.write_text(_helm_deployment(app_name, state.pull_secret_name), encoding="utf-8")
+    deployment_path.write_text(_helm_deployment(app_name), encoding="utf-8")
     files.append(deployment_path)
 
     argocd_path = argocd_dir / "application.yaml"

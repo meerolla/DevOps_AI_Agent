@@ -79,8 +79,18 @@ def run_tests(
     # Mount the repo into the container so test files are available regardless
     # of what the Dockerfile chose to COPY. The image provides the runtime
     # (Python + installed dependencies); the host checkout provides the tests.
+    # Run as the current user so pytest can write __pycache__ / .pytest_cache.
     repo_abs = str(repo_path.resolve())
-    command = f"docker run --rm -v {repo_abs}:/workspace -w /workspace {effective_image} {test_command}"
+    uid_gid = f"{os.getuid()}:{os.getgid()}"
+    command = (
+        f"docker run --rm "
+        f"--user {uid_gid} "
+        f"-e PYTHONDONTWRITEBYTECODE=1 "
+        f"-v {repo_abs}:/workspace "
+        f"-w /workspace "
+        f"{effective_image} "
+        f"{test_command} -p no:cacheprovider"
+    )
     ok, output = run_command(command, cwd=repo_path)
 
     if not ok and _is_no_tests_collected(output):

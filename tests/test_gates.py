@@ -201,7 +201,12 @@ def test_run_tests_uses_docker_run_with_image_ref(monkeypatch, tmp_path: Path) -
 
     result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:sha-abc123")
     assert result.ok is True
-    assert f"docker run --rm -v {tmp_path.resolve()}:/workspace -w /workspace ghcr.io/demo/app:sha-abc123 pytest -q" == captured["command"]
+    cmd = captured["command"]
+    assert "ghcr.io/demo/app:sha-abc123" in cmd
+    assert f"-v {tmp_path.resolve()}:/workspace" in cmd
+    assert "--user" in cmd
+    assert "-e PYTHONDONTWRITEBYTECODE=1" in cmd
+    assert "-p no:cacheprovider" in cmd
     assert result.details == "tests executed in container"
 
 
