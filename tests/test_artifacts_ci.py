@@ -112,12 +112,12 @@ def test_generated_post_merge_activation_workflow(tmp_path: Path) -> None:
     assert "runs-on: [self-hosted]" in workflow_text
     assert "helm_values.py get-tag --file deploy/helm/values.yaml" in workflow_text
     assert "helm upgrade --install" not in workflow_text
-    assert "kubectl --context \"default\" apply -f deploy/argocd/application.yaml" in workflow_text
+    assert "kubectl --context \"${{ vars.KUBE_CONTEXT }}\" apply -f deploy/argocd/application.yaml" in workflow_text
     assert "argocd app sync \"$APP_NAME\" --server \"$ARGOCD_SERVER\" --grpc-web" in workflow_text
     assert "ARGOCD_SERVER not set; skipping manual argocd sync" in workflow_text
     assert "--kube-context" not in workflow_text
     assert "--namespace" not in workflow_text
-    assert "vars.KUBE_CONTEXT" not in workflow_text
+    assert "vars.KUBE_CONTEXT" in workflow_text
     assert "vars.APP_NAMESPACE" not in workflow_text
 
 
@@ -211,12 +211,11 @@ def test_generated_ports_are_consistent(tmp_path: Path) -> None:
 
     values_text = (tmp_path / "deploy" / "helm" / "values.yaml").read_text(encoding="utf-8")
     deployment_text = (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8")
-    docker_text = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
 
     assert "containerPort: 8080" in values_text
     assert "port: 8080" in values_text
     assert "containerPort: {{ .Values.containerPort }}" in deployment_text
-    assert "EXPOSE 8080" in docker_text
+    # Dockerfile is created by the Dockerizer agent, not by generate_pipeline_artifacts
 
 
 def test_generated_deployment_has_health_probes(tmp_path: Path) -> None:
@@ -310,17 +309,26 @@ def test_generated_post_merge_no_helm_upgrade(tmp_path: Path) -> None:
     assert "kubectl" in workflow_text  # ArgoCD apply is still present
 
 
-def test_generated_fallback_dockerfile_is_multistage(tmp_path: Path) -> None:
-    """Fallback Dockerfile must have base/test/runtime stages."""
+def test_generate_artifacts_does_not_create_fallback_dockerfile(tmp_path: Path) -> None:
+    """generate_pipeline_artifacts must NOT create a Dockerfile — that is the Dockerizer's job."""
     state = _make_state(tmp_path)
     plan = BuildPlan(language="python", test_command="pytest -q")
     generate_pipeline_artifacts(state, plan)
 
-    dockerfile_text = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
-    assert "AS base" in dockerfile_text
-    assert "AS test" in dockerfile_text
-    assert "AS runtime" in dockerfile_text
-    assert "pytest" in dockerfile_text
+    # No fallback Dockerfile should have been written
+    assert not (tmp_path / "Dockerfile").exists()
+
+
+def test_generate_artifacts_includes_dockerfile_if_already_exists(tmp_path: Path) -> None:
+    """If a Dockerfile was already created (e.g. resume path), it is included in the returned files."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\n", encoding="utf-8")
+
+    returned_files = generate_pipeline_artifacts(state, plan)
+
+    assert dockerfile in returned_files
 
 
 def test_state_test_image_ref_defaults_none(tmp_path: Path) -> None:
@@ -386,3 +394,40 @@ def test_generated_helm_deployment_uses_values_pull_secret(tmp_path: Path) -> No
     deployment_text = (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8")
     assert "{{ .Values.pullSecretName }}" in deployment_text
     assert "ghcr-pull-secret" not in deployment_text
+
+
+def test_argocd_app_has_create_namespace_sync_option(tmp_path: Path) -> None:
+    """ArgoCD application must have CreateNamespace=true in syncOptions."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    argocd_text = (tmp_path / "deploy" / "argocd" / "application.yaml").read_text(encoding="utf-8")
+    assert "CreateNamespace=true" in argocd_text
+    assert "syncOptions:" in argocd_text
+
+
+def test_deployment_has_resource_requests_and_limits(tmp_path: Path) -> None:
+    """Helm deployment template must include resource requests and limits."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    deployment_text = (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+    assert "resources:" in deployment_text
+    assert "requests:" in deployment_text
+    assert "limits:" in deployment_text
+    assert "64Mi" in deployment_text
+    assert "256Mi" in deployment_text
+
+
+def test_self_heal_job_is_gated_off(tmp_path: Path) -> None:
+    """ci-self-heal.yml must gate the job with if: false (stage-3 not yet implemented)."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    self_heal_text = (tmp_path / ".github" / "workflows" / "ci-self-heal.yml").read_text(encoding="utf-8")
+    assert "if: ${{ false }}" in self_heal_text
+    # Must not look like a working step that does nothing
+    assert "Invoke stage-3" not in self_heal_text

@@ -318,15 +318,17 @@ on:
 
 jobs:
   diagnose:
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    # Stage-3 self-heal not yet implemented — this job intentionally skips.
+    # When implemented: checkout repo, read failed run logs, open a GitHub issue with diagnosis.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
-      - name: Placeholder self-heal hook
-        run: echo 'Invoke stage-3 self-heal workflow here'
+      - name: Self-heal placeholder
+        run: echo 'Stage-3 self-heal not yet implemented'
 """
 
 
-def _workflow_post_merge_activate(cluster: str, namespace: str) -> str:
+def _workflow_post_merge_activate() -> str:
     workflow = """name: post-merge-activate
 
 on:
@@ -359,7 +361,7 @@ jobs:
           app_name=$(python -c "import yaml; print(yaml.safe_load(open('deploy/argocd/application.yaml'))['metadata']['name'])")
           echo "APP_NAME=$app_name" >> "$GITHUB_ENV"
       - name: Apply ArgoCD application
-        run: kubectl --context "__CLUSTER__" apply -f deploy/argocd/application.yaml
+        run: kubectl --context "${{ vars.KUBE_CONTEXT }}" apply -f deploy/argocd/application.yaml
       - name: Optional ArgoCD sync
         run: |
           if command -v argocd >/dev/null 2>&1; then
@@ -372,7 +374,7 @@ jobs:
             echo "argocd CLI not found on runner; relying on automated sync policy"
           fi
 """
-    return workflow.replace("__CLUSTER__", cluster).replace("__NAMESPACE__", namespace)
+    return workflow
 
 
 def _helm_chart_yaml(app_name: str, app_version: str) -> str:
@@ -433,6 +435,13 @@ spec:
               port: {{{{ .Values.containerPort }}}}
             initialDelaySeconds: 5
             periodSeconds: 10
+          resources:
+            requests:
+              memory: {{{{ .Values.resources.requests.memory | default \"64Mi\" }}}}
+              cpu: {{{{ .Values.resources.requests.cpu | default \"50m\" }}}}
+            limits:
+              memory: {{{{ .Values.resources.limits.memory | default \"256Mi\" }}}}
+              cpu: {{{{ .Values.resources.limits.cpu | default \"500m\" }}}}
 ---
 apiVersion: v1
 kind: Service
@@ -469,6 +478,8 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
 """
 
 
@@ -518,31 +529,10 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     files: list[Path] = []
 
     dockerfile_path = repo / "Dockerfile"
-    if not dockerfile_path.exists():
-        dockerfile_path.write_text(
-            "\n".join(
-                [
-                    "FROM python:3.12.3-slim AS base",
-                    "WORKDIR /app",
-                    "RUN useradd -m appuser",
-                    "COPY requirements.txt /app/requirements.txt",
-                    "RUN pip install --no-cache-dir -r requirements.txt",
-                    "",
-                    "FROM base AS test",
-                    "RUN pip install --no-cache-dir pytest pytest-cov",
-                    "COPY . /app",
-                    "",
-                    "FROM base AS runtime",
-                    "COPY . /app",
-                    f"EXPOSE {port}",
-                    "USER appuser",
-                    f"CMD [\"python\", \"-m\", \"http.server\", \"{port}\"]",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-    files.append(dockerfile_path)
+    if dockerfile_path.exists():
+        # Dockerfile was already created by the Dockerizer agent (re-run / resume path).
+        # On a first run it doesn't exist yet — run_dockerizer in _node_build creates it.
+        files.append(dockerfile_path)
 
     ci_path = workflow_dir / "ci.yml"
     ci_path.write_text(_workflow_ci(plan), encoding="utf-8")
@@ -557,7 +547,7 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     files.append(self_heal_path)
 
     activate_path = workflow_dir / "post-merge-activate.yml"
-    activate_path.write_text(_workflow_post_merge_activate(state.cluster, state.namespace), encoding="utf-8")
+    activate_path.write_text(_workflow_post_merge_activate(), encoding="utf-8")
     files.append(activate_path)
 
     chart_path = repo / "deploy" / "helm" / "Chart.yaml"
