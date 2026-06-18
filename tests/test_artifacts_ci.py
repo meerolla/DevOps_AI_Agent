@@ -327,3 +327,62 @@ def test_state_test_image_ref_defaults_none(tmp_path: Path) -> None:
     from orchestrator.state import PipelineState
     state = PipelineState(goal="demo", repo_ref=str(tmp_path))
     assert state.test_image_ref is None
+
+
+def test_generated_ci_skip_ci_uses_null_safe_expression(tmp_path: Path) -> None:
+    """[skip ci] guards must use null-safe || fallback for PR compatibility."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    # Null-safe form: head_commit.message || pull_request.title || ''
+    assert "github.event.pull_request.title" in ci_text
+    # build-and-bump uses null-safe || '' fallback
+    assert "(github.event.head_commit.message || '')" in ci_text
+
+
+def test_generated_ci_docker_run_has_user_and_no_cache(tmp_path: Path) -> None:
+    """In-container test step must run as host user to avoid permission failures."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "--user" in ci_text
+    assert "PYTHONDONTWRITEBYTECODE=1" in ci_text
+    assert "no:cacheprovider" in ci_text
+
+
+def test_generated_post_merge_app_name_from_argocd_manifest(tmp_path: Path) -> None:
+    """APP_NAME must be read from the ArgoCD manifest, not from the repo name."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    workflow_text = (tmp_path / ".github" / "workflows" / "post-merge-activate.yml").read_text(encoding="utf-8")
+    assert "basename" not in workflow_text
+    assert "deploy/argocd/application.yaml" in workflow_text
+    assert "metadata" in workflow_text or "yaml.safe_load" in workflow_text
+
+
+def test_generated_helm_values_has_pull_secret_name(tmp_path: Path) -> None:
+    """values.yaml must contain pullSecretName so the chart is configurable."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    values_text = (tmp_path / "deploy" / "helm" / "values.yaml").read_text(encoding="utf-8")
+    assert "pullSecretName:" in values_text
+    assert "ghcr-pull-secret" in values_text
+
+
+def test_generated_helm_deployment_uses_values_pull_secret(tmp_path: Path) -> None:
+    """Deployment template must reference .Values.pullSecretName, not hardcode the secret name."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    deployment_text = (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+    assert "{{ .Values.pullSecretName }}" in deployment_text
+    assert "ghcr-pull-secret" not in deployment_text
