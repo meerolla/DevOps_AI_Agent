@@ -19,6 +19,7 @@ def build_image(repo_path: Path, image_tag: str) -> ToolResult:
             details="sandbox build succeeded",
             output="sandbox build",
             artifact_ref=image_tag,
+            test_artifact_ref=f"{image_tag}-test",
         )
 
     token = os.getenv("GITHUB_TOKEN") or os.getenv("GHCR_TOKEN")
@@ -40,6 +41,14 @@ def build_image(repo_path: Path, image_tag: str) -> ToolResult:
             artifact_ref=None,
         )
 
+    # Build the test stage image (local only — not pushed)
+    test_tag = f"{image_tag}-test"
+    test_ok, test_output = run_command(f"docker build --target test -t {test_tag} .", cwd=repo_path)
+    output = f"{output}\n{test_output}"
+    if not test_ok:
+        # Non-fatal: single-stage Dockerfile won't have AS test — fall back to runtime image for tests
+        test_tag = image_tag
+
     push_ok, push_output = run_command(f"docker push {image_tag}", cwd=repo_path)
     output = f"{output}\n{push_output}"
     return ToolResult(
@@ -48,4 +57,5 @@ def build_image(repo_path: Path, image_tag: str) -> ToolResult:
         details="docker build/push executed",
         output=output,
         artifact_ref=image_tag if push_ok else None,
+        test_artifact_ref=test_tag if push_ok else None,
     )

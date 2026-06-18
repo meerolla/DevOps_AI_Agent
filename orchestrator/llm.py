@@ -182,11 +182,17 @@ def _default_dockerfile_for_plan(plan: BuildPlan, dependency_files: list[str]) -
         install_line = "RUN pip install --no-cache-dir -r requirements.txt" if "requirements.txt" in dependency_files else "RUN pip install --no-cache-dir fastapi uvicorn"
         return "\n".join(
             [
-                "FROM python:3.12-slim AS runtime",
+                "FROM python:3.12-slim AS base",
                 "WORKDIR /app",
                 "RUN useradd -m appuser",
                 "COPY requirements.txt /app/requirements.txt",
                 install_line,
+                "",
+                "FROM base AS test",
+                "RUN pip install --no-cache-dir pytest pytest-cov",
+                "COPY . /app",
+                "",
+                "FROM base AS runtime",
                 "COPY . /app",
                 "USER appuser",
                 f'CMD ["uvicorn", "{plan.entrypoint if plan.entrypoint != "unknown" else "app.main:app"}", "--host", "0.0.0.0", "--port", "{port}"]',
@@ -211,14 +217,21 @@ def _default_dockerfile_for_plan(plan: BuildPlan, dependency_files: list[str]) -
 
     if language == "python":
         entrypoint = plan.entrypoint if plan.entrypoint.endswith(".py") else "app.py"
-        install_line = "RUN pip install --no-cache-dir -r requirements.txt" if "requirements.txt" in dependency_files else "RUN pip install --no-cache-dir pytest==8.2.2"
+        install_line = "RUN pip install --no-cache-dir -r requirements.txt" if "requirements.txt" in dependency_files else "RUN pip install --no-cache-dir -r requirements.txt"
         return "\n".join(
             [
-                "FROM python:3.12-slim AS runtime",
+                "FROM python:3.12-slim AS base",
                 "WORKDIR /app",
                 "RUN useradd -m appuser",
-                "COPY . /app",
+                "COPY requirements.txt /app/requirements.txt",
                 install_line,
+                "",
+                "FROM base AS test",
+                "RUN pip install --no-cache-dir pytest pytest-cov",
+                "COPY . /app",
+                "",
+                "FROM base AS runtime",
+                "COPY . /app",
                 "USER appuser",
                 f'CMD ["python", "{entrypoint}"]',
                 "",

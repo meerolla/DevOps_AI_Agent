@@ -38,6 +38,11 @@ def test_generated_ci_workflow_has_pr_and_main_tracks(tmp_path: Path) -> None:
     assert "helm_values.py set-tag" in ci_text
     assert "deploy/helm/values.yaml" in ci_text
     assert "[skip ci]" in ci_text
+    # [skip ci] guard on both jobs
+    assert ci_text.count("[skip ci]") >= 2
+    # in-container test step in build-and-bump
+    assert "--target test" in ci_text
+    assert "github.workspace" in ci_text
     # Python-specific
     assert "setup-python" in ci_text
     assert "pip install -r requirements.txt" in ci_text
@@ -106,13 +111,12 @@ def test_generated_post_merge_activation_workflow(tmp_path: Path) -> None:
     assert "github.event.workflow_run.head_branch == 'main'" in workflow_text
     assert "runs-on: [self-hosted]" in workflow_text
     assert "helm_values.py get-tag --file deploy/helm/values.yaml" in workflow_text
-    assert "helm upgrade --install" in workflow_text
-    assert "--set image.tag=\"$IMAGE_TAG\"" in workflow_text
+    assert "helm upgrade --install" not in workflow_text
     assert "kubectl --context \"default\" apply -f deploy/argocd/application.yaml" in workflow_text
     assert "argocd app sync \"$APP_NAME\" --server \"$ARGOCD_SERVER\" --grpc-web" in workflow_text
     assert "ARGOCD_SERVER not set; skipping manual argocd sync" in workflow_text
-    assert "--kube-context \"default\"" in workflow_text
-    assert "--namespace \"my-app\"" in workflow_text
+    assert "--kube-context" not in workflow_text
+    assert "--namespace" not in workflow_text
     assert "vars.KUBE_CONTEXT" not in workflow_text
     assert "vars.APP_NAMESPACE" not in workflow_text
 
@@ -258,3 +262,68 @@ sidecar:
     updated = values_path.read_text(encoding="utf-8")
     assert "tag: new-tag" in updated
     assert "tag: should-stay" in updated
+
+
+def test_generated_deployment_uses_release_name_not_hardcoded(tmp_path: Path) -> None:
+    """Helm deployment template must use .Release.Name, not a hardcoded app name."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    deployment_text = (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+    assert "{{ .Release.Name }}" in deployment_text
+    # The literal app name must not appear as a hardcoded resource name
+    assert "name: sample" not in deployment_text
+    assert "app: sample" not in deployment_text
+
+
+def test_generated_ci_has_in_container_test_step(tmp_path: Path) -> None:
+    """build-and-bump job must build test stage and run tests inside the container."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "--target test" in ci_text
+    assert "github.workspace" in ci_text
+    assert "-v" in ci_text  # volume mount
+
+
+def test_generated_ci_skip_ci_guard_on_both_jobs(tmp_path: Path) -> None:
+    """Both test and build-and-bump jobs must guard against [skip ci] commits."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert ci_text.count("[skip ci]") >= 2
+
+
+def test_generated_post_merge_no_helm_upgrade(tmp_path: Path) -> None:
+    """post-merge-activate must not contain helm upgrade --install (ArgoCD is the deploy mechanism)."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    workflow_text = (tmp_path / ".github" / "workflows" / "post-merge-activate.yml").read_text(encoding="utf-8")
+    assert "helm upgrade" not in workflow_text
+    assert "kubectl" in workflow_text  # ArgoCD apply is still present
+
+
+def test_generated_fallback_dockerfile_is_multistage(tmp_path: Path) -> None:
+    """Fallback Dockerfile must have base/test/runtime stages."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    dockerfile_text = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
+    assert "AS base" in dockerfile_text
+    assert "AS test" in dockerfile_text
+    assert "AS runtime" in dockerfile_text
+    assert "pytest" in dockerfile_text
+
+
+def test_state_test_image_ref_defaults_none(tmp_path: Path) -> None:
+    from orchestrator.state import PipelineState
+    state = PipelineState(goal="demo", repo_ref=str(tmp_path))
+    assert state.test_image_ref is None

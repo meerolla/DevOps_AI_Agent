@@ -205,6 +205,29 @@ def test_run_tests_uses_docker_run_with_image_ref(monkeypatch, tmp_path: Path) -
     assert result.details == "tests executed in container"
 
 
+def test_run_tests_prefers_test_image_ref_over_image_ref(monkeypatch, tmp_path: Path) -> None:
+    """When test_image_ref is provided, it should be used instead of image_ref."""
+    monkeypatch.setenv("SANDBOX", "0")
+    (tmp_path / "tests").mkdir()
+
+    captured = {}
+
+    def fake_run(command: str, cwd: Path, env=None):
+        captured["command"] = command
+        return True, "1 passed"
+
+    monkeypatch.setattr(test_mod, "run_command", fake_run)
+
+    result = run_tests(
+        tmp_path, "pytest -q",
+        image_ref="ghcr.io/demo/app:latest",
+        test_image_ref="ghcr.io/demo/app:latest-test",
+    )
+    assert result.ok is True
+    assert "ghcr.io/demo/app:latest-test" in captured["command"]
+    assert "ghcr.io/demo/app:latest " not in captured["command"]
+
+
 def test_run_tests_propagates_container_failure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SANDBOX", "0")
     (tmp_path / "tests").mkdir()
@@ -231,6 +254,7 @@ def test_run_tests_fails_without_image_ref(monkeypatch, tmp_path: Path) -> None:
 def test_state_require_tests_defaults_false(tmp_path: Path) -> None:
     state = PipelineState(goal="demo", repo_ref=str(tmp_path))
     assert state.require_tests is False
+    assert state.test_image_ref is None
 
 
 def test_run_tests_detects_test_files_in_root(monkeypatch, tmp_path: Path) -> None:
