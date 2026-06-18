@@ -158,11 +158,11 @@ def test_diagnose_fix_scan_vulnerability_escalates(tmp_path: Path) -> None:
 
 # ── Full pipeline run: app-code bug escalates correctly ───────────────────────
 
-def test_full_run_mock_sandbox_app_bug_escalates(tmp_path: Path) -> None:
+def test_full_run_mock_sandbox_app_bug_escalates(monkeypatch, tmp_path: Path) -> None:
     """Seeded app bug causes test step to escalate. No app code is patched."""
-    os.environ["SANDBOX"] = "1"
-    os.environ["LLM_MODE"] = "mock"
-    os.environ["FORCE_TEST_FAIL"] = "1"
+    monkeypatch.setenv("SANDBOX", "1")
+    monkeypatch.setenv("LLM_MODE", "mock")
+    monkeypatch.setenv("FORCE_TEST_FAIL", "1")
 
     fixture_repo = Path("tests/fixtures/sample-repo")
     repo_copy = tmp_path / "sample-repo"
@@ -198,8 +198,6 @@ def test_full_run_mock_sandbox_app_bug_escalates(tmp_path: Path) -> None:
     # audit log contains no secrets
     for entry in final_state.audit:
         assert "ghp_" not in entry.details
-
-    os.environ.pop("FORCE_TEST_FAIL", None)
 
 
 # ── H5: pipeline-setup.yaml precedence ───────────────────────────────────────
