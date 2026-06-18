@@ -1,10 +1,12 @@
 from pathlib import Path
 
 import orchestrator.tools.infra as infra
+import orchestrator.tools.test as test_mod
 from orchestrator.main import _save_state
 from orchestrator.state import PipelineState
 from orchestrator.tools.deploy import deploy
 from orchestrator.tools.infra import provision_infra
+from orchestrator.tools.test import run_tests
 
 
 def test_provision_requires_approval_and_plan(tmp_path: Path) -> None:
@@ -150,3 +152,99 @@ def test_provision_private_repo_with_argocd_repo_creds_ensures_secret(monkeypatc
     assert result.ok is True
     assert saw_repo_secret_apply["value"] is True
     assert "argocd repo secret ensured" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Test execution isolation
+# ---------------------------------------------------------------------------
+
+def test_run_tests_skips_when_no_test_surface(tmp_path: Path) -> None:
+    # Repo with no tests/ dir and no test_*.py files
+    result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:latest")
+    assert result.ok is True
+    assert result.details == "tests_skipped_no_tests_detected"
+
+
+def test_run_tests_require_tests_fails_when_no_surface(tmp_path: Path) -> None:
+    result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:latest", require_tests=True)
+    assert result.ok is False
+    assert result.details == "tests_required_but_none_detected"
+
+
+def test_run_tests_skips_when_command_is_unknown(tmp_path: Path) -> None:
+    # Even with a tests/ dir, command="unknown" means no tests
+    (tmp_path / "tests").mkdir()
+    result = run_tests(tmp_path, "unknown", image_ref="ghcr.io/demo/app:latest")
+    assert result.ok is True
+    assert result.details == "tests_skipped_no_tests_detected"
+
+
+def test_run_tests_sandbox_returns_ok(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SANDBOX", "1")
+    (tmp_path / "tests").mkdir()
+    result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:latest")
+    assert result.ok is True
+    assert "sandbox" in result.details
+
+
+def test_run_tests_uses_docker_run_with_image_ref(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SANDBOX", "0")
+    (tmp_path / "tests").mkdir()
+
+    captured = {}
+
+    def fake_run(command: str, cwd: Path, env=None):
+        captured["command"] = command
+        return True, "1 passed"
+
+    monkeypatch.setattr(test_mod, "run_command", fake_run)
+
+    result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:sha-abc123")
+    assert result.ok is True
+    assert "docker run --rm ghcr.io/demo/app:sha-abc123 pytest -q" == captured["command"]
+    assert result.details == "tests executed in container"
+
+
+def test_run_tests_propagates_container_failure(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SANDBOX", "0")
+    (tmp_path / "tests").mkdir()
+
+    def fake_run(command: str, cwd: Path, env=None):
+        return False, "FAILED tests/test_app.py::test_foo - AssertionError"
+
+    monkeypatch.setattr(test_mod, "run_command", fake_run)
+
+    result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:latest")
+    assert result.ok is False
+    assert "AssertionError" in result.output
+
+
+def test_run_tests_fails_without_image_ref(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SANDBOX", "0")
+    (tmp_path / "tests").mkdir()
+
+    result = run_tests(tmp_path, "pytest -q", image_ref=None)
+    assert result.ok is False
+    assert result.details == "test_execution_requires_docker"
+
+
+def test_state_require_tests_defaults_false(tmp_path: Path) -> None:
+    state = PipelineState(goal="demo", repo_ref=str(tmp_path))
+    assert state.require_tests is False
+
+
+def test_run_tests_detects_test_files_in_root(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SANDBOX", "0")
+    (tmp_path / "test_app.py").write_text("def test_x(): pass")
+
+    captured = {}
+
+    def fake_run(command: str, cwd: Path, env=None):
+        captured["command"] = command
+        return True, "1 passed"
+
+    monkeypatch.setattr(test_mod, "run_command", fake_run)
+
+    result = run_tests(tmp_path, "pytest -q", image_ref="ghcr.io/demo/app:latest")
+    assert result.ok is True
+    assert "docker run" in captured["command"]

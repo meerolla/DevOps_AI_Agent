@@ -45,6 +45,16 @@ def test_run_parser_supports_no_draft_pr_flag() -> None:
     assert args.no_draft_pr is True
 
 
+def test_run_parser_require_tests_flag() -> None:
+    parser = build_parser()
+    base = ["run", "--repo", "./my-app", "--cluster", "k3d", "--registry", "ghcr.io/org/app", "--namespace", "demo"]
+    args_default = parser.parse_args(base)
+    assert args_default.require_tests is False
+
+    args_set = parser.parse_args(base + ["--require-tests"])
+    assert args_set.require_tests is True
+
+
 def test_retry_parser_accepts_from_step() -> None:
     parser = build_parser()
     args = parser.parse_args(["retry", "--repo", "./my-app", "--from-step", "test"])

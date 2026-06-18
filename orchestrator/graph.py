@@ -86,7 +86,12 @@ def _node_test(state: OrchestratorGraphState) -> OrchestratorGraphState:
     repo_path = Path(pipeline_state.repo_ref)
 
     def _run_test() -> tuple[bool, str]:
-        result = run_tests(repo_path, pipeline_state.build_plan.test_command)
+        result = run_tests(
+            repo_path,
+            pipeline_state.build_plan.test_command,
+            image_ref=pipeline_state.image_ref,
+            require_tests=pipeline_state.require_tests,
+        )
         pipeline_state.test_results = result.output
         return result.ok, result.output
 
