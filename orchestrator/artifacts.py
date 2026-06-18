@@ -398,6 +398,14 @@ pullSecretName: {pull_secret_name}
 service:
   type: ClusterIP
   port: {port}
+
+resources:
+  requests:
+    memory: "64Mi"
+    cpu: "50m"
+  limits:
+    memory: "256Mi"
+    cpu: "500m"
 """
 
 
@@ -437,11 +445,11 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              memory: {{{{ .Values.resources.requests.memory | default \"64Mi\" }}}}
-              cpu: {{{{ .Values.resources.requests.cpu | default \"50m\" }}}}
+              memory: {{{{ .Values.resources.requests.memory }}}}
+              cpu: {{{{ .Values.resources.requests.cpu }}}}
             limits:
-              memory: {{{{ .Values.resources.limits.memory | default \"256Mi\" }}}}
-              cpu: {{{{ .Values.resources.limits.cpu | default \"500m\" }}}}
+              memory: {{{{ .Values.resources.limits.memory }}}}
+              cpu: {{{{ .Values.resources.limits.cpu }}}}
 ---
 apiVersion: v1
 kind: Service

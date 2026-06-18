@@ -408,7 +408,7 @@ def test_argocd_app_has_create_namespace_sync_option(tmp_path: Path) -> None:
 
 
 def test_deployment_has_resource_requests_and_limits(tmp_path: Path) -> None:
-    """Helm deployment template must include resource requests and limits."""
+    """Helm deployment template must reference resources from values; values.yaml must define defaults."""
     state = _make_state(tmp_path)
     plan = BuildPlan(language="python", test_command="pytest -q")
     generate_pipeline_artifacts(state, plan)
@@ -417,8 +417,15 @@ def test_deployment_has_resource_requests_and_limits(tmp_path: Path) -> None:
     assert "resources:" in deployment_text
     assert "requests:" in deployment_text
     assert "limits:" in deployment_text
-    assert "64Mi" in deployment_text
-    assert "256Mi" in deployment_text
+    # No hardcoded defaults in template — values come from values.yaml
+    assert ".Values.resources.requests.memory" in deployment_text
+    assert ".Values.resources.limits.memory" in deployment_text
+
+    values_text = (tmp_path / "deploy" / "helm" / "values.yaml").read_text(encoding="utf-8")
+    assert "64Mi" in values_text
+    assert "256Mi" in values_text
+    assert "50m" in values_text
+    assert "500m" in values_text
 
 
 def test_self_heal_job_is_gated_off(tmp_path: Path) -> None:
