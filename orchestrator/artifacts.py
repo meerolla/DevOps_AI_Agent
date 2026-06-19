@@ -123,6 +123,7 @@ def _ci_build_setup_steps(language: str) -> str:
 
 
 def _workflow_ci(plan: BuildPlan) -> str:
+    cache_flag = " -p no:cacheprovider" if plan.language.lower() == "python" else ""
     setup_steps = _ci_setup_steps(plan.language)
     test_cmd = _ci_test_command(plan)
     build_setup_steps = _ci_build_setup_steps(plan.language)
@@ -179,7 +180,7 @@ jobs:
             -v "${{{{ github.workspace }}}}":/workspace \
             -w /workspace \
             "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" \
-            {test_cmd} -p no:cacheprovider
+            {test_cmd}{cache_flag}
       - name: Build and push image
         run: |
           docker build \

@@ -11,7 +11,7 @@ from orchestrator.agents.dockerizer import run_dockerizer
 from orchestrator.agents.planner import run_planner
 from orchestrator.artifacts import generate_pipeline_artifacts
 from orchestrator.audit import append_audit
-from orchestrator.gitops import auto_commit_generated_artifacts, create_draft_pr_for_generated_artifacts
+from orchestrator.gitops import auto_commit_generated_artifacts, create_draft_pr_for_generated_artifacts, set_github_repo_variables
 from orchestrator.state import PipelineState, StepName
 from orchestrator.tools.deploy import deploy
 from orchestrator.tools.health import healthcheck
@@ -227,6 +227,12 @@ def _node_finalize(state: OrchestratorGraphState) -> OrchestratorGraphState:
                 return state
 
         append_audit(pipeline_state, "deploy", "artifact_validation", "ok", "all checks passed")
+
+        gh_var_warnings = set_github_repo_variables(
+            repo_path, pipeline_state.cluster, pipeline_state.namespace
+        )
+        for warning in gh_var_warnings:
+            append_audit(pipeline_state, "deploy", "github_variables", "warning", warning)
 
         ok_commit, commit_output = auto_commit_generated_artifacts(
             repo_path,

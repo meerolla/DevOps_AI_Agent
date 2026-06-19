@@ -167,3 +167,85 @@ def create_draft_pr_for_generated_artifacts(
         return True, data["html_url"]
     message = data.get("message", "unknown GitHub API error")
     return False, message
+
+
+def set_github_repo_variables(repo_path: Path, cluster: str, namespace: str) -> list[str]:
+    """Create or update GitHub Actions repository variables KUBE_CONTEXT and DEPLOY_NAMESPACE.
+
+    Returns a list of warning strings for any variable that could not be set (caller should log them).
+    On sandbox, skips all API calls and returns an empty list.
+    """
+    if is_sandbox():
+        return []
+
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if not token:
+        return [
+            "⚠ GITHUB_TOKEN not set — skipping GitHub variable provisioning. "
+            "Set variables manually: Settings → Secrets and variables → Actions → Variables: "
+            f"KUBE_CONTEXT = {cluster} | DEPLOY_NAMESPACE = {namespace}"
+        ]
+
+    ok_remote, remote_url = run_command("git remote get-url origin", cwd=repo_path, env=_GIT_NON_INTERACTIVE_ENV)
+    if not ok_remote:
+        return [f"⚠ Could not determine git remote: {remote_url}"]
+
+    remote = remote_url.strip()
+    owner_repo = ""
+    if remote.startswith("git@github.com:"):
+        owner_repo = remote.replace("git@github.com:", "").replace(".git", "")
+    elif "github.com/" in remote:
+        owner_repo = remote.split("github.com/")[-1].replace(".git", "")
+    if not owner_repo or "/" not in owner_repo:
+        return [f"⚠ Could not parse GitHub owner/repo from remote: {remote}"]
+
+    warnings: list[str] = []
+    variables = {"KUBE_CONTEXT": cluster, "DEPLOY_NAMESPACE": namespace}
+
+    for name, value in variables.items():
+        base_url = f"https://api.github.com/repos/{owner_repo}/actions/variables"
+        auth_header = f"-H \"Authorization: Bearer {token}\""
+        accept_header = "-H \"Accept: application/vnd.github+json\""
+
+        # Check if variable already exists
+        ok_get, out_get = run_command(
+            f"curl -sS -o /dev/null -w \"%{{http_code}}\" {auth_header} {accept_header} {base_url}/{name}",
+            cwd=repo_path,
+        )
+        exists = ok_get and out_get.strip() == "200"
+
+        if exists:
+            payload = json.dumps({"value": value})
+            ok_set, out_set = run_command(
+                f"curl -sS -X PATCH {auth_header} {accept_header} {base_url}/{name} -d '{payload}'",
+                cwd=repo_path,
+            )
+        else:
+            payload = json.dumps({"name": name, "value": value})
+            ok_set, out_set = run_command(
+                f"curl -sS -X POST {auth_header} {accept_header} {base_url} -d '{payload}'",
+                cwd=repo_path,
+            )
+
+        if not ok_set:
+            warnings.append(
+                f"⚠ Could not set GitHub variable {name}. "
+                f"Set it manually: Settings → Secrets and variables → Actions → Variables → "
+                f"New variable: {name} = {value}"
+            )
+            continue
+
+        # A successful PATCH returns 204 (no body); POST returns 201 with body
+        try:
+            if out_set.strip():
+                parsed = json.loads(out_set)
+                if "message" in parsed:
+                    warnings.append(
+                        f"⚠ Could not set GitHub variable {name} ({parsed['message']}). "
+                        f"Set it manually: Settings → Secrets and variables → Actions → Variables → "
+                        f"New variable: {name} = {value}"
+                    )
+        except Exception:
+            pass  # empty body on 204 is expected
+
+    return warnings
