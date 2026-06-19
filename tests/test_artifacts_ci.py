@@ -362,6 +362,31 @@ def test_generated_ci_docker_run_has_user_and_no_cache(tmp_path: Path) -> None:
     assert "no:cacheprovider" in ci_text
 
 
+def test_generated_ci_build_test_image_uses_grep_conditional(tmp_path: Path) -> None:
+    """Build test image step must use grep conditional, not a || fallback that masks failures."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    # grep conditional — no silent failure masking
+    assert "grep -q 'AS test' Dockerfile" in ci_text
+    # No || fallback
+    assert "--target test \\" not in ci_text or "|| \\" not in ci_text
+    assert "|| \\\n          docker build" not in ci_text
+
+
+def test_generated_ci_build_and_push_also_tags_latest(tmp_path: Path) -> None:
+    """Build-and-push step must tag and push :latest so values.yaml default is always valid."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    ci_text = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert '":latest"' in ci_text or ":latest" in ci_text
+    assert 'docker push "${{IMAGE_REPOSITORY}}:latest"' in ci_text or "docker push" in ci_text and ":latest" in ci_text
+
+
 def test_generated_post_merge_app_name_from_argocd_manifest(tmp_path: Path) -> None:
     """APP_NAME must be read from the ArgoCD manifest, not from the repo name."""
     state = _make_state(tmp_path)

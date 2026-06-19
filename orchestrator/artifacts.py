@@ -165,9 +165,12 @@ jobs:
           password: ${{{{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}}}
       - name: Build test image
         run: |
-          docker build --target test \
-            -t "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" . || \
-          docker build -t "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" .
+          if grep -q 'AS test' Dockerfile; then
+            docker build --target test \
+              -t "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" .
+          else
+            docker build -t "${{IMAGE_REPOSITORY}}:test-${{GITHUB_SHA}}" .
+          fi
       - name: Run tests inside container
         run: |
           docker run --rm \
@@ -181,8 +184,10 @@ jobs:
         run: |
           docker build \
             --label "org.opencontainers.image.source=${{GITHUB_SERVER_URL}}/${{GITHUB_REPOSITORY}}" \
-            -t "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}" .
+            -t "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}" \
+            -t "${{IMAGE_REPOSITORY}}:latest" .
           docker push "${{IMAGE_REPOSITORY}}:${{GITHUB_SHA}}"
+          docker push "${{IMAGE_REPOSITORY}}:latest"
       - name: Bump Helm image tag
         run: |
           python .github/scripts/helm_values.py set-tag --file deploy/helm/values.yaml --tag "${{GITHUB_SHA}}"
