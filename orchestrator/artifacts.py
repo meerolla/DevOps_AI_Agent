@@ -339,7 +339,7 @@ on:
 
 jobs:
   activate:
-    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: [self-hosted]
     permissions:
       contents: read
@@ -358,7 +358,7 @@ jobs:
           echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
       - name: Resolve application name
         run: |
-          app_name=$(python -c "import yaml; print(yaml.safe_load(open('deploy/argocd/application.yaml'))['metadata']['name'])")
+          app_name=$(awk '/^metadata:/{found=1} found && /^  name:/{print $2; exit}' deploy/argocd/application.yaml)
           echo "APP_NAME=$app_name" >> "$GITHUB_ENV"
       - name: Apply ArgoCD application
         run: kubectl --context "${{ vars.KUBE_CONTEXT }}" apply -f deploy/argocd/application.yaml
@@ -424,12 +424,13 @@ spec:
       labels:
         app: {{{{ .Release.Name }}}}
     spec:
+      {{{{- if .Values.pullSecretName }}}}
       imagePullSecrets:
         - name: {{{{ .Values.pullSecretName }}}}
+      {{{{- end }}}}
       containers:
         - name: {{{{ .Release.Name }}}}
-          image: \"{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}\"
-          ports:
+          image: \"{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}\"          imagePullPolicy: "{{{{- if eq .Values.image.tag \"latest\" }}}}Always{{{{- else }}}}IfNotPresent{{{{- end }}}}"          ports:
             - containerPort: {{{{ .Values.containerPort }}}}
           livenessProbe:
             httpGet:
