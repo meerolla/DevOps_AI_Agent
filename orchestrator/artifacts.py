@@ -430,7 +430,9 @@ spec:
       {{{{- end }}}}
       containers:
         - name: {{{{ .Release.Name }}}}
-          image: \"{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}\"          imagePullPolicy: "{{{{- if eq .Values.image.tag \"latest\" }}}}Always{{{{- else }}}}IfNotPresent{{{{- end }}}}"          ports:
+          image: "{{{{ .Values.image.repository }}}}:{{{{ .Values.image.tag }}}}"
+          imagePullPolicy: {{{{ if eq .Values.image.tag "latest" }}}}Always{{{{ else }}}}IfNotPresent{{{{ end }}}}
+          ports:
             - containerPort: {{{{ .Values.containerPort }}}}
           livenessProbe:
             httpGet:
