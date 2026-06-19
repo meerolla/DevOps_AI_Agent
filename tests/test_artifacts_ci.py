@@ -428,6 +428,23 @@ def test_deployment_has_resource_requests_and_limits(tmp_path: Path) -> None:
     assert "500m" in values_text
 
 
+def test_deployment_imagepullpolicy_is_dynamic(tmp_path: Path) -> None:
+    """imagePullPolicy must use a Helm conditional, on its own line (not collapsed with image:)."""
+    state = _make_state(tmp_path)
+    plan = BuildPlan(language="python", test_command="pytest -q")
+    generate_pipeline_artifacts(state, plan)
+
+    deployment_text = (tmp_path / "deploy" / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+    # Each key must be on its own line — collapsed lines cause helm template parse errors
+    assert "\n          imagePullPolicy:" in deployment_text
+    assert "\n          image:" in deployment_text
+    assert "\n          ports:" in deployment_text
+    # Must contain the dynamic conditional logic
+    assert "if eq .Values.image.tag" in deployment_text
+    assert "Always" in deployment_text
+    assert "IfNotPresent" in deployment_text
+
+
 def test_self_heal_job_is_gated_off(tmp_path: Path) -> None:
     """ci-self-heal.yml must gate the job with if: false (stage-3 not yet implemented)."""
     state = _make_state(tmp_path)
