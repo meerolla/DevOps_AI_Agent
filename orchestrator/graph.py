@@ -13,6 +13,7 @@ from orchestrator.artifacts import generate_pipeline_artifacts
 from orchestrator.audit import append_audit
 from orchestrator.gitops import auto_commit_generated_artifacts, create_draft_pr_for_generated_artifacts, set_github_repo_variables
 from orchestrator.state import PipelineState, StepName
+from orchestrator.tools.build import build_image
 from orchestrator.tools.deploy import deploy
 from orchestrator.tools.health import healthcheck
 from orchestrator.tools.infra import build_infra_plan, provision_infra
@@ -54,42 +55,101 @@ def _node_dockerize(state: OrchestratorGraphState) -> OrchestratorGraphState:
     return state
 
 
+def _component_image_tag(state: PipelineState, component_name: str) -> str:
+    """Derive a per-component image tag from the top-level registry string."""
+    base = state.registry.rsplit(":", 1)[0]  # strip any existing :tag suffix
+    return f"{base}-{component_name}:latest"
+
+
 def _node_build(state: OrchestratorGraphState) -> OrchestratorGraphState:
     pipeline_state = state["pipeline_state"]
     repo_path = Path(pipeline_state.repo_ref)
+    plan = pipeline_state.build_plan
 
     image_tag = pipeline_state.image_ref_for_registry()
     if pipeline_state.step_status["build"] != "ok":
-        dockerfile_ref, build_result = run_dockerizer(
+        dockerfile_ref, dockerize_result = run_dockerizer(
             repo_path,
-            pipeline_state.build_plan,
+            plan,
             image_tag,
             retry_limit=pipeline_state.retry_limit,
         )
         pipeline_state.dockerfile_ref = dockerfile_ref
-        if not build_result.ok:
-            pipeline_state.mark_step("build", "escalated")
-            append_audit(pipeline_state, "build", "run", "escalated", build_result.output)
-            pipeline_state.escalate_reason = "docker build failed after bounded retries"
-            return state
 
-        pipeline_state.image_ref = build_result.artifact_ref or image_tag
-        pipeline_state.test_image_ref = build_result.test_artifact_ref or pipeline_state.image_ref
+        # Multi-component: run_dockerizer only wrote Dockerfiles; build each image now.
+        if plan and plan.components:
+            all_ok = True
+            for component in plan.components:
+                comp_tag = _component_image_tag(pipeline_state, component.name)
+                comp_result = build_image(
+                    repo_path,
+                    comp_tag,
+                    dockerfile_rel=component.dockerfile_path,
+                    context_rel=component.context_path or ".",
+                )
+                if not comp_result.ok:
+                    pipeline_state.mark_step("build", "escalated")
+                    append_audit(
+                        pipeline_state, "build", "run", "escalated",
+                        f"component={component.name} | {comp_result.output}",
+                    )
+                    pipeline_state.escalate_reason = f"docker build failed for component {component.name}"
+                    all_ok = False
+                    break
+                component.image_ref = comp_result.artifact_ref or comp_tag
+                component.test_image_ref = comp_result.test_artifact_ref or component.image_ref
+                append_audit(pipeline_state, "build", "run", "ok",
+                             f"component={component.name} image={component.image_ref}")
+            if not all_ok:
+                return state
+            # Use the first component as the "primary" for state.image_ref (ArgoCD/healthcheck)
+            pipeline_state.image_ref = plan.components[0].image_ref
+            pipeline_state.test_image_ref = plan.components[0].test_image_ref
+        else:
+            # Single-component: run_dockerizer already called build_image internally
+            if not dockerize_result.ok:
+                pipeline_state.mark_step("build", "escalated")
+                append_audit(pipeline_state, "build", "run", "escalated", dockerize_result.output)
+                pipeline_state.escalate_reason = "docker build failed after bounded retries"
+                return state
+            pipeline_state.image_ref = dockerize_result.artifact_ref or image_tag
+            pipeline_state.test_image_ref = dockerize_result.test_artifact_ref or pipeline_state.image_ref
+
         pipeline_state.mark_step("dockerize", "ok")
         pipeline_state.mark_step("build", "ok")
         append_audit(pipeline_state, "dockerize", "agent", "ok", f"dockerfile={dockerfile_ref}")
-        append_audit(pipeline_state, "build", "run", "ok", build_result.output)
+        append_audit(pipeline_state, "build", "run", "ok", dockerize_result.output)
     return state
 
 
 def _node_test(state: OrchestratorGraphState) -> OrchestratorGraphState:
     pipeline_state = state["pipeline_state"]
     repo_path = Path(pipeline_state.repo_ref)
+    plan = pipeline_state.build_plan
 
     def _run_test() -> tuple[bool, str]:
+        # Multi-component: run tests for each component in turn; all must pass.
+        if plan and plan.components:
+            all_output: list[str] = []
+            for component in plan.components:
+                result = run_tests(
+                    repo_path,
+                    component.test_command if component.test_command != "unknown" else plan.test_command,
+                    image_ref=component.image_ref or None,
+                    test_image_ref=component.test_image_ref or None,
+                    require_tests=pipeline_state.require_tests,
+                )
+                all_output.append(f"[{component.name}] {result.output}")
+                if not result.ok:
+                    pipeline_state.test_results = "\n".join(all_output)
+                    return False, "\n".join(all_output)
+            output = "\n".join(all_output)
+            pipeline_state.test_results = output
+            return True, output
+
         result = run_tests(
             repo_path,
-            pipeline_state.build_plan.test_command,
+            plan.test_command if plan else "unknown",
             image_ref=pipeline_state.image_ref,
             test_image_ref=pipeline_state.test_image_ref,
             require_tests=pipeline_state.require_tests,
@@ -105,10 +165,23 @@ def _node_test(state: OrchestratorGraphState) -> OrchestratorGraphState:
 def _node_scan(state: OrchestratorGraphState) -> OrchestratorGraphState:
     pipeline_state = state["pipeline_state"]
     repo_path = Path(pipeline_state.repo_ref)
-
+    plan = pipeline_state.build_plan
     image_tag = pipeline_state.image_ref_for_registry()
 
     def _run_scan() -> tuple[bool, str]:
+        # Multi-component: scan each image; all must pass.
+        if plan and plan.components:
+            all_output: list[str] = []
+            for component in plan.components:
+                result = scan_image(repo_path, component.image_ref or image_tag)
+                all_output.append(f"[{component.name}] {result.output}")
+                if not result.ok:
+                    pipeline_state.scan_report = "\n".join(all_output)
+                    return False, "\n".join(all_output)
+            output = "\n".join(all_output)
+            pipeline_state.scan_report = output
+            return True, output
+
         result = scan_image(repo_path, pipeline_state.image_ref or image_tag)
         pipeline_state.scan_report = result.output
         return result.ok, result.output

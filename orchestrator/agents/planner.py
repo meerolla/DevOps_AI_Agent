@@ -8,7 +8,7 @@ import yaml
 
 from orchestrator.agents.repo_tools import list_repo_files, read_repo_file
 from orchestrator.llm import get_llm
-from orchestrator.state import BuildPlan
+from orchestrator.state import BuildPlan, ComponentPlan
 
 
 _DEPENDENCY_FILES = [
@@ -60,6 +60,32 @@ def _collect_planner_evidence(repo_path: Path) -> dict[str, Any]:
 _PLAN_OVERRIDE_KEYS = {"language", "framework", "entrypoint", "ports", "test_command", "stateful", "needs_db"}
 
 
+def _detect_components(repo_path: Path) -> list[ComponentPlan]:
+    """Scan for multi-service layout (services/<name>/Dockerfile or apps/<name>/Dockerfile).
+
+    Returns a list of ComponentPlan stubs (name + paths only) or an empty list
+    when the repo follows a single-component layout.
+    """
+    components: list[ComponentPlan] = []
+    for base_name in ("services", "apps"):
+        base_dir = repo_path / base_name
+        if not base_dir.is_dir():
+            continue
+        for subdir in sorted(base_dir.iterdir()):
+            if not subdir.is_dir():
+                continue
+            if (subdir / "Dockerfile").exists():
+                rel_context = str(subdir.relative_to(repo_path)).replace("\\", "/")
+                components.append(
+                    ComponentPlan(
+                        name=subdir.name,
+                        dockerfile_path=f"{rel_context}/Dockerfile",
+                        context_path=rel_context,
+                    )
+                )
+    return components
+
+
 def _load_config_overrides(repo_path: Path) -> dict[str, Any]:
     """Load pipeline-setup.yaml and return only the recognised BuildPlan fields.
 
@@ -91,6 +117,14 @@ def _apply_config_overrides(plan: BuildPlan, overrides: dict[str, Any]) -> Build
     return BuildPlan.model_validate(merged)
 
 
+def _with_components(plan: BuildPlan, repo_path: Path) -> BuildPlan:
+    """Attach detected multi-service components to the plan (deterministic, no LLM)."""
+    components = _detect_components(repo_path)
+    if not components:
+        return plan
+    return BuildPlan.model_validate({**plan.model_dump(), "components": [c.model_dump() for c in components]})
+
+
 def run_planner(repo_path: Path) -> BuildPlan:
     llm = get_llm()
     config_overrides = _load_config_overrides(repo_path)
@@ -116,13 +150,16 @@ def run_planner(repo_path: Path) -> BuildPlan:
             )
             payload = json.loads(raw)
             plan = _normalize_build_plan_payload(payload)
-            return _apply_config_overrides(plan, config_overrides)
+            plan = _apply_config_overrides(plan, config_overrides)
+            return _with_components(plan, repo_path)
     except Exception:
         pass  # fall through to evidence-based path
 
     evidence = _collect_planner_evidence(repo_path)
     if hasattr(llm, "plan_from_evidence"):
         plan = llm.plan_from_evidence(evidence)  # type: ignore[assignment]
-        return _apply_config_overrides(plan, config_overrides)
+        plan = _apply_config_overrides(plan, config_overrides)
+        return _with_components(plan, repo_path)
     plan = llm.plan_repo(repo_path)
-    return _apply_config_overrides(plan, config_overrides)
+    plan = _apply_config_overrides(plan, config_overrides)
+    return _with_components(plan, repo_path)

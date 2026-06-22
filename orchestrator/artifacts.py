@@ -276,6 +276,42 @@ def _set_tag(path: Path, tag: str) -> None:
     path.write_text("".join(lines), encoding="utf-8")
 
 
+def _set_component_tag(path: Path, component: str, tag: str) -> None:
+    \"\"\"Update components.<component>.image.tag in a multi-component values.yaml.\"\"\"
+    lines = _read_lines(path)
+    in_components = False
+    in_component = False
+    in_image = False
+    updated = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not in_components and stripped == "components:":
+            in_components = True
+            continue
+        if in_components and not in_component:
+            if stripped == f"{component}:":
+                in_component = True
+            continue
+        if in_component and not in_image:
+            if stripped == "image:":
+                in_image = True
+            elif not line.startswith((" ", "\\t")):
+                break
+            continue
+        if in_image:
+            if stripped.startswith("tag:"):
+                indent = line[: len(line) - len(line.lstrip(" \\t"))]
+                newline = "\\n" if line.endswith("\\n") else ""
+                lines[idx] = f"{indent}tag: {tag}{newline}"
+                updated = True
+                break
+            if not line.startswith((" ", "\\t")):
+                break
+    if not updated:
+        raise ValueError(f"components.{component}.image.tag not found in {path}")
+    path.write_text("".join(lines), encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read and update helm/values.yaml image fields")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -286,9 +322,10 @@ def main() -> int:
     get_tag = sub.add_parser("get-tag", help="Print image.tag")
     get_tag.add_argument("--file", required=True)
 
-    set_tag = sub.add_parser("set-tag", help="Update image.tag")
+    set_tag = sub.add_parser("set-tag", help="Update image.tag (or components.<name>.image.tag with --component)")
     set_tag.add_argument("--file", required=True)
     set_tag.add_argument("--tag", required=True)
+    set_tag.add_argument("--component", default="", help="Component name for multi-component charts")
 
     args = parser.parse_args()
     values_path = Path(args.file)
@@ -302,7 +339,10 @@ def main() -> int:
         return 0
 
     if args.command == "set-tag":
-        _set_tag(values_path, args.tag)
+        if args.component:
+            _set_component_tag(values_path, args.component, args.tag)
+        else:
+            _set_tag(values_path, args.tag)
         return 0
 
     parser.print_help()
@@ -524,6 +564,215 @@ def regenerate_argocd_application(state: PipelineState) -> Path:
     return argocd_path
 
 
+def _component_base_registry(state_registry: str) -> str:
+    """Strip any :tag suffix from the registry string to get the base image path."""
+    return state_registry.rsplit(":", 1)[0]
+
+
+def _workflow_ci_multi(plan: BuildPlan, state_registry: str) -> str:
+    """Generate a CI workflow for multi-component (multi-Dockerfile) repos."""
+    base_registry = _component_base_registry(state_registry)
+    cache_flag = " -p no:cacheprovider" if plan.language.lower() == "python" else ""
+    build_setup_steps = _ci_build_setup_steps(plan.language)
+    setup_steps = _ci_setup_steps(plan.language)
+    test_cmd = _ci_test_command(plan)
+
+    # Per-component build/test/push steps
+    component_steps: list[str] = []
+    component_names: list[str] = []
+    for comp in plan.components:
+        name = comp.name
+        image_repo = f"{base_registry}-{name}"
+        df = comp.dockerfile_path
+        ctx = comp.context_path or "."
+        comp_test_cmd = comp.test_command if comp.test_command not in ("unknown", "") else test_cmd
+        comp_cache_flag = " -p no:cacheprovider" if (comp.language or plan.language).lower() == "python" else ""
+        component_names.append(name)
+        component_steps.append(f"""\
+      - name: Build test image [{name}]
+        run: |
+          if grep -q 'AS test' {df}; then
+            docker build -f {df} --target test \\
+              -t "{image_repo}:test-${{GITHUB_SHA}}" {ctx}
+          else
+            docker build -f {df} \\
+              -t "{image_repo}:test-${{GITHUB_SHA}}" {ctx}
+          fi
+      - name: Run tests [{name}]
+        run: |
+          docker run --rm \\
+            --user "$(id -u):$(id -g)" \\
+            -e PYTHONDONTWRITEBYTECODE=1 \\
+            -v "${{{{ github.workspace }}}}":/workspace \\
+            -w /workspace \\
+            "{image_repo}:test-${{GITHUB_SHA}}" \\
+            {comp_test_cmd}{comp_cache_flag}
+      - name: Build and push [{name}]
+        run: |
+          docker build -f {df} \\
+            --label "org.opencontainers.image.source=${{GITHUB_SERVER_URL}}/${{GITHUB_REPOSITORY}}" \\
+            -t "{image_repo}:${{GITHUB_SHA}}" \\
+            -t "{image_repo}:latest" \\
+            {ctx}
+          docker push "{image_repo}:${{GITHUB_SHA}}"
+          docker push "{image_repo}:latest"\
+""")
+
+    # Bump Helm tag per component
+    bump_steps: list[str] = []
+    for name in component_names:
+        bump_steps.append(f"""\
+      - name: Bump Helm image tag [{name}]
+        run: |
+          python .github/scripts/helm_values.py set-tag \\
+            --file deploy/helm/values.yaml \\
+            --component {name} \\
+            --tag "${{GITHUB_SHA}}"\
+""")
+
+    all_component_steps = "\n".join(component_steps)
+    all_bump_steps = "\n".join(bump_steps)
+
+    return f"""name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    if: ${{{{ !contains((github.event.head_commit.message || github.event.pull_request.title || ''), '[skip ci]') }}}}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+{setup_steps}
+      - name: Run tests
+        run: {test_cmd}
+
+  build-and-bump:
+    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains((github.event.head_commit.message || ''), '[skip ci]') }}}}
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+{build_setup_steps}
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{{{ github.actor }}}}
+          password: ${{{{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}}}
+{all_component_steps}
+{all_bump_steps}
+      - name: Commit and push image tag bumps
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/helm/values.yaml
+          git diff --cached --quiet && echo "No image tag change to commit" && exit 0
+          git commit -m "chore(ci): bump image tags to ${{GITHUB_SHA}} [skip ci]"
+          git push
+"""
+
+
+def _helm_values_multi(components: list, pull_secret_name: str) -> str:
+    """Generate values.yaml for a multi-component Helm chart."""
+    comp_blocks: list[str] = []
+    for comp in components:
+        port = comp.ports[0] if comp.ports else 8000
+        comp_blocks.append(f"""\
+  {comp.name}:
+    image:
+      repository: placeholder-{comp.name}
+      tag: latest
+    containerPort: {port}
+    healthPath: /health
+    service:
+      type: ClusterIP
+      port: {port}""")
+    components_yaml = "\n".join(comp_blocks)
+    return f"""pullSecretName: {pull_secret_name}
+
+resources:
+  requests:
+    memory: "64Mi"
+    cpu: "50m"
+  limits:
+    memory: "256Mi"
+    cpu: "500m"
+
+components:
+{components_yaml}
+"""
+
+
+def _helm_deployment_component(component_name: str) -> str:
+    """Generate a Deployment+Service template for one component in a multi-component chart."""
+    val = f".Values.components.{component_name}"
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{{{ .Release.Name }}}}-{component_name}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{{{ .Release.Name }}}}-{component_name}
+  template:
+    metadata:
+      labels:
+        app: {{{{ .Release.Name }}}}-{component_name}
+    spec:
+      {{{{- if .Values.pullSecretName }}}}
+      imagePullSecrets:
+        - name: {{{{ .Values.pullSecretName }}}}
+      {{{{- end }}}}
+      containers:
+        - name: {component_name}
+          image: "{{{{ {val}.image.repository }}}}:{{{{ {val}.image.tag }}}}"
+          imagePullPolicy: {{{{ if eq {val}.image.tag "latest" }}}}Always{{{{ else }}}}IfNotPresent{{{{ end }}}}
+          ports:
+            - containerPort: {{{{ {val}.containerPort }}}}
+          livenessProbe:
+            httpGet:
+              path: {{{{ {val}.healthPath | default "/health" }}}}
+              port: {{{{ {val}.containerPort }}}}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: {{{{ {val}.healthPath | default "/health" }}}}
+              port: {{{{ {val}.containerPort }}}}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: {{{{ .Values.resources.requests.memory }}}}
+              cpu: {{{{ .Values.resources.requests.cpu }}}}
+            limits:
+              memory: {{{{ .Values.resources.limits.memory }}}}
+              cpu: {{{{ .Values.resources.limits.cpu }}}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{{{ .Release.Name }}}}-{component_name}
+spec:
+  type: {{{{ {val}.service.type | default "ClusterIP" }}}}
+  selector:
+    app: {{{{ .Release.Name }}}}-{component_name}
+  ports:
+    - port: {{{{ {val}.service.port | default {val}.containerPort }}}}
+      targetPort: {{{{ {val}.containerPort }}}}
+      protocol: TCP
+      name: http
+"""
+
+
 def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[Path]:
     repo = Path(state.repo_ref)
     app_name = state.app_name
@@ -532,6 +781,7 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     app_version = _git_short_sha(repo)
     repo_url = _git_remote_https_url(repo)
     revision = _gitops_target_revision(repo)
+    is_multi = bool(plan.components)
 
     workflow_dir = repo / ".github" / "workflows"
     workflow_scripts_dir = repo / ".github" / "scripts"
@@ -545,14 +795,22 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
 
     files: list[Path] = []
 
-    dockerfile_path = repo / "Dockerfile"
-    if dockerfile_path.exists():
-        # Dockerfile was already created by the Dockerizer agent (re-run / resume path).
-        # On a first run it doesn't exist yet — run_dockerizer in _node_build creates it.
-        files.append(dockerfile_path)
+    # Collect existing Dockerfiles (created by Dockerizer; not generated here)
+    if is_multi:
+        for comp in plan.components:
+            df = repo / comp.dockerfile_path
+            if df.exists():
+                files.append(df)
+    else:
+        dockerfile_path = repo / "Dockerfile"
+        if dockerfile_path.exists():
+            files.append(dockerfile_path)
 
     ci_path = workflow_dir / "ci.yml"
-    ci_path.write_text(_workflow_ci(plan), encoding="utf-8")
+    ci_path.write_text(
+        _workflow_ci_multi(plan, state.registry) if is_multi else _workflow_ci(plan),
+        encoding="utf-8",
+    )
     files.append(ci_path)
 
     helm_values_helper_path = workflow_scripts_dir / "helm_values.py"
@@ -572,12 +830,21 @@ def generate_pipeline_artifacts(state: PipelineState, plan: BuildPlan) -> list[P
     files.append(chart_path)
 
     values_path = repo / "deploy" / "helm" / "values.yaml"
-    values_path.write_text(_helm_values(state.image_ref_for_registry(), port, health_path, state.pull_secret_name), encoding="utf-8")
+    if is_multi:
+        values_path.write_text(_helm_values_multi(plan.components, state.pull_secret_name), encoding="utf-8")
+    else:
+        values_path.write_text(_helm_values(state.image_ref_for_registry(), port, health_path, state.pull_secret_name), encoding="utf-8")
     files.append(values_path)
 
-    deployment_path = helm_templates / "deployment.yaml"
-    deployment_path.write_text(_helm_deployment(app_name), encoding="utf-8")
-    files.append(deployment_path)
+    if is_multi:
+        for comp in plan.components:
+            dep_path = helm_templates / f"deployment-{comp.name}.yaml"
+            dep_path.write_text(_helm_deployment_component(comp.name), encoding="utf-8")
+            files.append(dep_path)
+    else:
+        deployment_path = helm_templates / "deployment.yaml"
+        deployment_path.write_text(_helm_deployment(app_name), encoding="utf-8")
+        files.append(deployment_path)
 
     argocd_path = argocd_dir / "application.yaml"
     argocd_path.write_text(_argocd_application(app_name, state.namespace, repo_url, revision), encoding="utf-8")

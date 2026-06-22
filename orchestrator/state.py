@@ -22,6 +22,23 @@ PauseReason = Literal["approve_infra", "approve_deploy"]
 FixType = Literal["infra_hint", "config_hint", "tool_retry", "escalate"]
 
 
+class ComponentPlan(BaseModel):
+    """Describes one service/component inside a multi-service repository."""
+
+    name: str
+    language: str = "unknown"
+    framework: str = "unknown"
+    entrypoint: str = "unknown"
+    # Paths relative to the repo root
+    dockerfile_path: str = "Dockerfile"
+    context_path: str = ""  # docker build context; defaults to parent dir of dockerfile_path
+    # Set at build time by _node_build
+    image_ref: str = ""
+    test_image_ref: str = ""
+    ports: List[int] = Field(default_factory=list)
+    test_command: str = "unknown"
+
+
 class BuildPlan(BaseModel):
     language: str = "unknown"
     framework: str = "unknown"
@@ -32,6 +49,9 @@ class BuildPlan(BaseModel):
     needs_db: Optional[bool] = None
     test_command: str = "unknown"
     notes: List[str] = Field(default_factory=list)
+    # Non-empty only for multi-service repos (services/ or apps/ subdirectory layout).
+    # When empty the single-component pipeline path is used unchanged.
+    components: List[ComponentPlan] = Field(default_factory=list)
 
 
 class FixProposal(BaseModel):

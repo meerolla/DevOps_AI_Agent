@@ -5,7 +5,7 @@ from typing import Any
 
 from orchestrator.agents.repo_tools import read_repo_file
 from orchestrator.llm import get_llm
-from orchestrator.state import BuildPlan, ToolResult
+from orchestrator.state import BuildPlan, ComponentPlan, ToolResult
 from orchestrator.tools.build import build_image
 
 
@@ -50,8 +50,55 @@ def _enforce_framework_runtime(plan: BuildPlan, dockerfile_content: str) -> str:
     return dockerfile_content
 
 
+def _component_build_plan(component: ComponentPlan, fallback: BuildPlan) -> BuildPlan:
+    """Build a per-component BuildPlan, inheriting from the repo-level plan where unset."""
+    return BuildPlan(
+        language=component.language if component.language != "unknown" else fallback.language,
+        framework=component.framework if component.framework != "unknown" else fallback.framework,
+        entrypoint=component.entrypoint if component.entrypoint != "unknown" else fallback.entrypoint,
+        ports=component.ports if component.ports else fallback.ports,
+        test_command=component.test_command if component.test_command != "unknown" else fallback.test_command,
+        dependencies=fallback.dependencies,
+    )
+
+
+def _write_component_dockerfile(
+    repo_path: Path,
+    component: ComponentPlan,
+    fallback_plan: BuildPlan,
+    llm: object,
+) -> Path:
+    """Write Dockerfile for one component inside its context directory. Returns the path written."""
+    comp_plan = _component_build_plan(component, fallback_plan)
+    comp_root = repo_path / component.context_path if component.context_path else repo_path
+    evidence = _collect_dockerizer_evidence(comp_root, comp_plan)
+
+    if hasattr(llm, "dockerize_from_evidence"):
+        content = llm.dockerize_from_evidence(comp_plan, evidence)  # type: ignore[assignment]
+    else:
+        content = llm.dockerize(comp_plan)  # type: ignore[union-attr]
+    content = _enforce_framework_runtime(comp_plan, content)
+
+    dockerfile_path = repo_path / component.dockerfile_path
+    dockerfile_path.parent.mkdir(parents=True, exist_ok=True)
+    dockerfile_path.write_text(content, encoding="utf-8")
+    return dockerfile_path
+
+
 def run_dockerizer(repo_path: Path, plan: BuildPlan, image_tag: str, retry_limit: int = 2) -> tuple[str, ToolResult]:
     llm = get_llm()
+
+    # Multi-component path: write one Dockerfile per component, no build here
+    # (building is done per-component in graph._node_build).
+    if plan.components:
+        written_paths: list[str] = []
+        for component in plan.components:
+            df_path = _write_component_dockerfile(repo_path, component, plan, llm)
+            written_paths.append(str(df_path))
+        return written_paths[0], ToolResult(
+            ok=True, step="build", details="multi-component dockerize", output="; ".join(written_paths)
+        )
+
     dockerfile_path = repo_path / "Dockerfile"
     evidence = _collect_dockerizer_evidence(repo_path, plan)
 
