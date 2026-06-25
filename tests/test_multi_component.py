@@ -77,6 +77,16 @@ def test_detect_components_finds_services_with_dockerfiles(tmp_path: Path) -> No
     assert names == {"api", "worker"}
 
 
+def test_detect_components_reads_expose_port_from_dockerfile(tmp_path: Path) -> None:
+    """_detect_components must populate ComponentPlan.ports from EXPOSE in each Dockerfile."""
+    repo = _copy_fixture(tmp_path)
+    components = _detect_components(repo)
+
+    by_name = {c.name: c for c in components}
+    assert by_name["api"].ports == [8000]
+    assert by_name["worker"].ports == [9000]
+
+
 def test_detect_components_returns_empty_for_single_service_repo(tmp_path: Path) -> None:
     """_detect_components returns empty list when there is no services/ or apps/ layout."""
     # A plain repo with only a top-level Dockerfile
@@ -202,6 +212,37 @@ def test_multi_component_helm_values_has_components_block(tmp_path: Path) -> Non
 
 # ---------------------------------------------------------------------------
 # Regression: single-component path unchanged
+"""Add validators import for port mismatch test."""
+from orchestrator.validators import validate_generated_artifacts
+
+
+# ---------------------------------------------------------------------------
+
+def test_validator_skips_port_checks_for_multi_component(tmp_path: Path) -> None:
+    """validate_generated_artifacts must not raise port-mismatch errors for multi-component charts."""
+    repo = _copy_fixture(tmp_path)
+    state = _make_multi_state(repo)
+    plan = _make_multi_plan()
+    generate_pipeline_artifacts(state, plan)
+
+    errors = validate_generated_artifacts(str(repo))
+    port_errors = [e for e in errors if "containerPort" in e or "Port mismatch" in e]
+    assert port_errors == [], f"Unexpected port errors for multi-component chart: {port_errors}"
+
+
+def test_multi_component_values_uses_expose_port(tmp_path: Path) -> None:
+    """values.yaml component port must match the EXPOSE in the component's Dockerfile."""
+    repo = _copy_fixture(tmp_path)
+    state = _make_multi_state(repo)
+    plan = run_planner(repo)  # use real planner so EXPOSE is read
+    generate_pipeline_artifacts(state, plan)
+
+    values_text = (repo / "deploy" / "helm" / "values.yaml").read_text(encoding="utf-8")
+    # api Dockerfile EXPOSEs 8000, worker EXPOSEs 9000
+    assert "containerPort: 8000" in values_text
+    assert "containerPort: 9000" in values_text
+
+
 # ---------------------------------------------------------------------------
 
 def test_single_component_artifacts_unchanged(tmp_path: Path) -> None:

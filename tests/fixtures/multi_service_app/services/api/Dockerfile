@@ -11,4 +11,5 @@ COPY . /app
 FROM base AS runtime
 COPY . /app
 USER appuser
+EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -124,20 +124,45 @@ For private GitHub app repositories, the orchestrator `provision_infra` step can
 
 ### Step 4: GHCR access
 
-Create PAT with scopes: write:packages, read:packages, repo.
+Create a PAT with scopes: `write:packages`, `read:packages`, `repo`.
+
+Export it in the shell where you run the orchestrator — this is the only manual step required:
 
 ```bash
-echo "<GITHUB_PAT>" | docker login ghcr.io -u "<github-username>" --password-stdin
-
-kubectl create namespace <app-namespace>
-kubectl -n <app-namespace> create secret docker-registry ghcr-pull \
-  --docker-server=ghcr.io \
-  --docker-username="<github-username>" \
-  --docker-password="<GITHUB_PAT>"
+export GITHUB_TOKEN="<your-github-pat>"
+export GHCR_TOKEN="<your-github-pat>"   # same value; used by both docker login and kubectl secret
 ```
 
-For GitHub Actions image push in generated `ci.yml`:
-- Preferred: set repository secret `GHCR_TOKEN` to a PAT with `write:packages` and `read:packages`.
+**`docker login` (for the machine running CI builds):**
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u "<github-username>" --password-stdin
+```
+
+**`ghcr-pull-secret` in Kubernetes — created automatically by the orchestrator.**
+
+During the `provision` step (after the infra approval gate), the orchestrator runs:
+
+```bash
+kubectl -n <app-namespace> create secret generic ghcr-pull-secret \
+  --from-literal=.dockerconfigjson='{"auths":{"ghcr.io":{"username":"oauth2","password":"<GITHUB_TOKEN>"}}}' \
+  --type=kubernetes.io/dockerconfigjson --dry-run=client -o yaml | kubectl apply -f -
+```
+
+The secret name (`ghcr-pull-secret` by default, overridable via `--pull-secret`) matches what is written into `deploy/helm/values.yaml`. You do **not** need to run `kubectl create secret` manually.
+
+If the provision step fails and you need to create it manually as a fallback:
+
+```bash
+kubectl create namespace <app-namespace>
+kubectl -n <app-namespace> create secret docker-registry ghcr-pull-secret \
+  --docker-server=ghcr.io \
+  --docker-username="<github-username>" \
+  --docker-password="$GITHUB_TOKEN"
+```
+
+**For GitHub Actions image push in generated `ci.yml`:**
+- Preferred: set repository secret `GHCR_TOKEN` to the same PAT (scopes: `write:packages`, `read:packages`).
 - Fallback: workflow uses `GITHUB_TOKEN` when `GHCR_TOKEN` is not set.
 - Generated login uses `github.actor` and labels the image with `org.opencontainers.image.source` to improve package-to-repo linkage in GHCR.
 

@@ -11,4 +11,5 @@ COPY . /app
 FROM base AS runtime
 COPY . /app
 USER appuser
+EXPOSE 9000
 CMD ["python", "main.py"]

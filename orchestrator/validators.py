@@ -73,26 +73,30 @@ def validate_generated_artifacts(repo_path: str) -> list[str]:
             errors.append(f"Invalid YAML in deploy/argocd/application.yaml: {exc}")
 
     # 4) port consistency: values containerPort and service.port and Dockerfile EXPOSE
+    # For multi-component repos values.yaml uses a nested components: block — skip the
+    # single-component checks in that case to avoid false positives.
     values_file = repo / "deploy" / "helm" / "values.yaml"
     dockerfile = repo / "Dockerfile"
     if values_file.exists():
         text = values_file.read_text(encoding="utf-8", errors="replace")
-        container_port = _extract_values_container_port(text)
-        service_port = _extract_values_service_port(text)
-        if container_port is None:
-            errors.append("Missing containerPort in deploy/helm/values.yaml")
-        if service_port is None:
-            errors.append("Missing service.port in deploy/helm/values.yaml")
-        if container_port is not None and service_port is not None and container_port != service_port:
-            errors.append(
-                f"Port mismatch in deploy/helm/values.yaml: containerPort={container_port} service.port={service_port}"
-            )
-        if dockerfile.exists() and container_port is not None:
-            expose = _extract_docker_expose(dockerfile.read_text(encoding="utf-8", errors="replace"))
-            if expose is not None and expose != container_port:
+        is_multi_component = re.search(r"(?m)^components:\s*$", text) is not None
+        if not is_multi_component:
+            container_port = _extract_values_container_port(text)
+            service_port = _extract_values_service_port(text)
+            if container_port is None:
+                errors.append("Missing containerPort in deploy/helm/values.yaml")
+            if service_port is None:
+                errors.append("Missing service.port in deploy/helm/values.yaml")
+            if container_port is not None and service_port is not None and container_port != service_port:
                 errors.append(
-                    f"Port mismatch: Dockerfile EXPOSE={expose} does not match deploy/helm/values.yaml containerPort={container_port}"
+                    f"Port mismatch in deploy/helm/values.yaml: containerPort={container_port} service.port={service_port}"
                 )
+            if dockerfile.exists() and container_port is not None:
+                expose = _extract_docker_expose(dockerfile.read_text(encoding="utf-8", errors="replace"))
+                if expose is not None and expose != container_port:
+                    errors.append(
+                        f"Port mismatch: Dockerfile EXPOSE={expose} does not match deploy/helm/values.yaml containerPort={container_port}"
+                    )
 
     # 5) deployment probes exist
     deployment_template = repo / "deploy" / "helm" / "templates" / "deployment.yaml"

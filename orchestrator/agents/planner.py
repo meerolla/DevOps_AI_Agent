@@ -60,6 +60,17 @@ def _collect_planner_evidence(repo_path: Path) -> dict[str, Any]:
 _PLAN_OVERRIDE_KEYS = {"language", "framework", "entrypoint", "ports", "test_command", "stateful", "needs_db"}
 
 
+def _extract_expose_port(dockerfile_path: Path) -> list[int]:
+    """Read a Dockerfile and return the first EXPOSEd port, or empty list if none found."""
+    try:
+        text = dockerfile_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    import re
+    match = re.search(r"(?m)^EXPOSE\s+(\d+)", text)
+    return [int(match.group(1))] if match else []
+
+
 def _detect_components(repo_path: Path) -> list[ComponentPlan]:
     """Scan for multi-service layout (services/<name>/Dockerfile or apps/<name>/Dockerfile).
 
@@ -76,11 +87,13 @@ def _detect_components(repo_path: Path) -> list[ComponentPlan]:
                 continue
             if (subdir / "Dockerfile").exists():
                 rel_context = str(subdir.relative_to(repo_path)).replace("\\", "/")
+                ports = _extract_expose_port(subdir / "Dockerfile")
                 components.append(
                     ComponentPlan(
                         name=subdir.name,
                         dockerfile_path=f"{rel_context}/Dockerfile",
                         context_path=rel_context,
+                        ports=ports,
                     )
                 )
     return components
